@@ -53,7 +53,7 @@ const razorpay = new Razorpay({
 });
 
 // ── NODEMAILER TRANSPORTER ───────────────────────────────────────
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,    // blissout303@gmail.com
