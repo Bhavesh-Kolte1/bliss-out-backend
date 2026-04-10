@@ -1,24 +1,72 @@
 /**
  * ═══════════════════════════════════════════════════════════════
  *  BLISS OUT DANCE STUDIO — Backend Server
- *  Express.js + Razorpay + Nodemailer + PDFKit
+ *  Express.js + Razorpay + Nodemailer + PDFKit + MongoDB/Mongoose
  * ═══════════════════════════════════════════════════════════════
  */
 
 'use strict';
 
-const express    = require('express');
-const cors       = require('cors');
-const crypto     = require('crypto');
-const Razorpay   = require('razorpay');
-const nodemailer = require('nodemailer');
+const express     = require('express');
+const cors        = require('cors');
+const crypto      = require('crypto');
+const Razorpay    = require('razorpay');
+const nodemailer  = require('nodemailer');
 const PDFDocument = require('pdfkit');
 const { v4: uuidv4 } = require('uuid');
+const mongoose    = require('mongoose');
 require('dotenv').config();
 
 // ── APP INIT ─────────────────────────────────────────────────────
 const app  = express();
 const PORT = process.env.PORT || 5000;
+
+// ── MONGOOSE CONNECTION ──────────────────────────────────────────
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  console.error('❌ MONGO_URI is not set in .env — exiting.');
+  process.exit(1);
+}
+
+mongoose
+  .connect(MONGO_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch((err) => {
+    console.error('❌ MongoDB connection error:', err.message);
+    process.exit(1);
+  });
+
+// ── MONGOOSE SCHEMAS & MODELS ────────────────────────────────────
+
+/**
+ * Registration Schema
+ * Holds one document per successful, verified payment.
+ * `isArchived` lets the admin reset route move old batches
+ * out of the active seat count without deleting real data.
+ */
+const registrationSchema = new mongoose.Schema(
+  {
+    name:           { type: String, required: true, trim: true },
+    email:          { type: String, required: true, trim: true, lowercase: true },
+    phone:          { type: String, required: true, trim: true },
+    age:            { type: String, required: true },
+    level:          { type: String, required: true },
+    city:           { type: String, required: true },
+    registrationId: { type: String, required: true, unique: true },
+    paymentId:      { type: String, required: true, unique: true },
+    orderId:        { type: String, required: true, unique: true },
+    paidAt:         { type: Date,   required: true },
+    // Soft-archive flag — set to true by /admin/reset-batch
+    isArchived:     { type: Boolean, default: false, index: true },
+  },
+  { timestamps: true }
+);
+
+const Registration = mongoose.model('Registration', registrationSchema);
+
+// ── CAPACITY CONFIG ──────────────────────────────────────────────
+const BATCH_CAPACITY = 30;
 
 // ── MIDDLEWARE ───────────────────────────────────────────────────
 app.use(express.json());
@@ -236,72 +284,52 @@ function generateGarbaPDF(data) {
 async function sendConfirmationEmail(data, pdfBuffer) {
   const htmlBody = `
   <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="UTF-8"/>
-    <style>
-      body { font-family: 'Segoe UI', Arial, sans-serif; background: #f5f0e8; margin: 0; padding: 0; }
-      .wrap { max-width: 580px; margin: 30px auto; background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.1); }
-      .header { background: linear-gradient(135deg, #C8102E, #7A000A); padding: 40px 32px; text-align: center; color: #fff; }
-      .header h1 { font-size: 26px; margin: 0 0 8px; }
-      .header p  { margin: 0; opacity: 0.85; font-size: 14px; }
-      .body  { padding: 36px 32px; }
-      .body h2 { font-size: 20px; color: #1a1526; margin: 0 0 12px; }
-      .body p  { color: #555; line-height: 1.7; font-size: 14px; margin: 0 0 16px; }
-      .reg-id-box { background: #f9f4ee; border: 1px solid #f5a623; border-radius: 8px; padding: 14px 20px; text-align: center; margin: 20px 0; }
-      .reg-id-box .label { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-      .reg-id-box .id    { font-family: monospace; font-size: 20px; font-weight: 700; color: #C8102E; letter-spacing: 2px; }
-      .details-table { width: 100%; border-collapse: collapse; margin: 16px 0; }
-      .details-table td { padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #f0e8e8; }
-      .details-table td:first-child { color: #999; width: 40%; }
-      .details-table td:last-child  { font-weight: 600; color: #1a1526; }
-      .cta { text-align: center; margin: 28px 0 12px; }
-      .cta a { display: inline-block; background: #C8102E; color: #fff; padding: 14px 36px; border-radius: 50px; font-size: 15px; font-weight: 700; text-decoration: none; }
-      .footer { background: #0F0C15; padding: 24px 32px; text-align: center; color: #666; font-size: 12px; }
-      .footer a { color: #F5A623; text-decoration: none; }
-      .note { background: #fff8e1; border-left: 3px solid #F5A623; padding: 12px 16px; font-size: 13px; color: #666; border-radius: 0 8px 8px 0; margin: 20px 0; }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <div class="header">
-        <h1>🎉 You're Registered!</h1>
-        <p>Bliss Out Garba Workshop 2025 · Khandwa, MP</p>
+  <html lang="en">
+  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+  <body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif;">
+    <div style="max-width:560px;margin:32px auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#C8102E;padding:28px 24px;text-align:center;">
+        <h1 style="margin:0;color:#FFD166;font-size:22px;">✦ Bliss Out Dance Studio ✦</h1>
+        <p style="margin:6px 0 0;color:rgba(255,255,255,.8);font-size:13px;">Khandwa, Madhya Pradesh</p>
       </div>
-      <div class="body">
-        <h2>Welcome, ${data.name}! 💃</h2>
-        <p>Your spot in the <strong>One-Month Garba Workshop</strong> is confirmed. We are thrilled to have you join the Bliss Out family!</p>
-
-        <div class="reg-id-box">
-          <div class="label">Your Registration ID</div>
-          <div class="id">${data.registrationId}</div>
-        </div>
-
-        <table class="details-table">
-          <tr><td>Name</td><td>${data.name}</td></tr>
-          <tr><td>Email</td><td>${data.email}</td></tr>
-          <tr><td>Phone</td><td>${data.phone}</td></tr>
-          <tr><td>Age</td><td>${data.age} years</td></tr>
-          <tr><td>Level</td><td>${data.level.charAt(0).toUpperCase() + data.level.slice(1)}</td></tr>
-          <tr><td>Workshop Start</td><td>1st October 2025</td></tr>
-          <tr><td>Daily Timing</td><td>6:30 PM – 8:30 PM (Mon–Sat)</td></tr>
-          <tr><td>Venue</td><td>Bliss Out Studio, Khandwa MP</td></tr>
-          <tr><td>Amount Paid</td><td style="color:#4CAF50;font-weight:700;">₹999 ✔</td></tr>
+      <div style="padding:28px 28px 8px;">
+        <h2 style="color:#333;font-size:19px;margin-top:0;">🎉 You're Registered!</h2>
+        <p style="color:#555;line-height:1.6;">
+          Hi <strong>${data.name}</strong>,<br>
+          Your spot in the <strong>One-Month Garba Workshop 2025</strong> is confirmed.
+          Your Garba Pass PDF is attached — please save it; you'll need it on Day 1.
+        </p>
+        <table style="width:100%;border-collapse:collapse;margin:18px 0;">
+          <tr style="background:#fdf6ee;">
+            <td style="padding:10px 14px;color:#888;font-size:12px;">REGISTRATION ID</td>
+            <td style="padding:10px 14px;font-weight:bold;color:#C8102E;">${data.registrationId}</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 14px;color:#888;font-size:12px;">PAYMENT ID</td>
+            <td style="padding:10px 14px;font-size:13px;color:#333;">${data.paymentId}</td>
+          </tr>
+          <tr style="background:#fdf6ee;">
+            <td style="padding:10px 14px;color:#888;font-size:12px;">START DATE</td>
+            <td style="padding:10px 14px;font-size:13px;color:#333;">1st October 2025</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 14px;color:#888;font-size:12px;">TIMING</td>
+            <td style="padding:10px 14px;font-size:13px;color:#333;">6:30 PM – 8:30 PM (Mon–Sat)</td>
+          </tr>
+          <tr style="background:#fdf6ee;">
+            <td style="padding:10px 14px;color:#888;font-size:12px;">VENUE</td>
+            <td style="padding:10px 14px;font-size:13px;color:#333;">Bliss Out Studio, Khandwa MP</td>
+          </tr>
         </table>
-
-        <div class="note">
-          📎 Your <strong>Garba Pass (PDF)</strong> is attached to this email. Please keep it safe and bring it on Day 1 of the workshop.
-        </div>
-
-        <div class="cta">
-          <a href="https://wa.me/918964033641">💬 Chat with Us on WhatsApp</a>
-        </div>
-
-        <p style="font-size:13px;color:#999;">If you have any questions, reply to this email or call us at <strong>+91 89640 33641</strong>.</p>
+        <p style="color:#555;line-height:1.6;font-size:13px;">
+          See you on the dance floor! 💃🕺
+        </p>
       </div>
-      <div class="footer">
-        <p>© 2025 Bliss Out Dance Studio · Khandwa, Madhya Pradesh</p>
-        <p><a href="mailto:blissout303@gmail.com">blissout303@gmail.com</a> · +91 89640 33641</p>
+      <div style="background:#f9f9f9;padding:16px 28px;border-top:1px solid #eee;text-align:center;">
+        <p style="margin:0;color:#aaa;font-size:11px;">Questions? Reach us at</p>
+        <p style="margin:4px 0 0;font-size:12px;">
+          <a href="mailto:blissout303@gmail.com">blissout303@gmail.com</a> · +91 89640 33641
+        </p>
       </div>
     </div>
   </body>
@@ -361,31 +389,69 @@ app.get('/', (req, res) => {
   res.json({
     status:  'running',
     service: 'Bliss Out Dance Studio API',
-    version: '1.0.0',
+    version: '2.0.0',
     time:    new Date().toISOString(),
   });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// ── Seat availability (public) ────────────────────────────────────
+app.get('/seats', async (req, res) => {
+  try {
+    const filled = await Registration.countDocuments({ isArchived: false });
+    res.json({
+      capacity:  BATCH_CAPACITY,
+      filled,
+      available: Math.max(0, BATCH_CAPACITY - filled),
+    });
+  } catch (err) {
+    console.error('❌ /seats error:', err);
+    res.status(500).json({ error: 'Could not fetch seat count.' });
+  }
+});
+
 /**
  * POST /create-order
- * Creates a Razorpay order and returns the order ID.
+ * ─────────────────
+ * Guards:
+ *   1. City must be "Khandwa" (case-insensitive).
+ *   2. Active batch must have fewer than BATCH_CAPACITY registrations.
+ * Only then is a Razorpay order created.
  */
 app.post('/create-order', async (req, res) => {
   try {
-    const { amount, name, email, phone } = req.body;
+    const { amount, name, email, phone, city } = req.body;
 
-    if (!amount || !name || !email || !phone) {
+    // ── 1. Required field check ─────────────────────────────────
+    if (!amount || !name || !email || !phone || !city) {
       return res.status(400).json({ error: 'Missing required fields.' });
     }
 
-    // Amount must be in paise; validate range
+    // ── 2. City validation — Khandwa residents only ─────────────
+    if (city.trim().toLowerCase() !== 'khandwa') {
+      return res.status(400).json({
+        error: 'Registrations are currently open for Khandwa residents only.',
+      });
+    }
+
+    // ── 3. Amount sanity check ──────────────────────────────────
     const amt = parseInt(amount);
-    if (isNaN(amt) || amt < 100 || amt > 10000000) {
+    if (isNaN(amt) || amt < 100 || amt > 10_000_000) {
       return res.status(400).json({ error: 'Invalid amount.' });
     }
 
+    // ── 4. Capacity gate — count active (non-archived) seats ────
+    const activeCount = await Registration.countDocuments({ isArchived: false });
+    if (activeCount >= BATCH_CAPACITY) {
+      return res.status(400).json({
+        error: `This batch is full (${BATCH_CAPACITY}/${BATCH_CAPACITY} seats taken). ` +
+               'Please check back when the next batch opens.',
+        seatsAvailable: 0,
+      });
+    }
+
+    // ── 5. Create Razorpay order ────────────────────────────────
     const order = await razorpay.orders.create({
       amount:   amt,
       currency: 'INR',
@@ -394,15 +460,17 @@ app.post('/create-order', async (req, res) => {
         name,
         email,
         phone,
+        city,
         studio: 'Bliss Out Dance Studio',
         event:  'Garba Workshop 2025',
       },
     });
 
     res.json({
-      orderId:  order.id,
-      amount:   order.amount,
-      currency: order.currency,
+      orderId:        order.id,
+      amount:         order.amount,
+      currency:       order.currency,
+      seatsRemaining: BATCH_CAPACITY - activeCount - 1, // optimistic
     });
 
   } catch (err) {
@@ -413,7 +481,14 @@ app.post('/create-order', async (req, res) => {
 
 /**
  * POST /verify-payment
- * Verifies the Razorpay signature, generates PDF, sends emails.
+ * ────────────────────
+ * Order of operations (strict):
+ *   1. Validate all required fields.
+ *   2. Verify Razorpay HMAC signature.
+ *   3. Save registration to MongoDB  ← failsafe: happens BEFORE PDF/email.
+ *   4. Generate Garba Pass PDF.
+ *   5. Send confirmation emails.
+ *   6. Respond with success.
  */
 app.post('/verify-payment', async (req, res) => {
   try {
@@ -424,12 +499,12 @@ app.post('/verify-payment', async (req, res) => {
       name, email, phone, age, level, city,
     } = req.body;
 
-    // ── Validate input ─────────────────────────────────────────
+    // ── 1. Validate input ───────────────────────────────────────
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({ success: false, error: 'Missing payment fields.' });
     }
 
-    // ── Verify Razorpay signature ──────────────────────────────
+    // ── 2. Verify Razorpay signature ────────────────────────────
     const expectedSignature = crypto
       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -440,7 +515,8 @@ app.post('/verify-payment', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Payment signature invalid.' });
     }
 
-    // ── Generate Registration ID ───────────────────────────────
+    // ── 3. Save to MongoDB (BEFORE PDF + email) ─────────────────
+    //    This is the source of truth. If email fails, the record is still safe.
     const registrationId = generateRegistrationId();
 
     const registrantData = {
@@ -453,20 +529,38 @@ app.post('/verify-payment', async (req, res) => {
       registrationId,
       paymentId:      razorpay_payment_id,
       orderId:        razorpay_order_id,
-      paidAt:         new Date().toISOString(),
+      paidAt:         new Date(),
     };
 
-    // ── Generate Garba Pass PDF ────────────────────────────────
+    try {
+      const reg = new Registration(registrantData);
+      await reg.save();
+      console.log(`✅ Registration saved to DB: ${registrationId}`);
+    } catch (dbErr) {
+      // If it's a duplicate key (same paymentId / orderId), the payment was
+      // already processed — respond gracefully rather than erroring out.
+      if (dbErr.code === 11000) {
+        console.warn(`⚠️  Duplicate payment attempt for order ${razorpay_order_id}`);
+        return res.status(409).json({
+          success: false,
+          error: 'This payment has already been processed. Check your email for your Garba Pass.',
+        });
+      }
+      // Any other DB error is fatal — don't send a pass for a record we couldn't save.
+      throw dbErr;
+    }
+
+    // ── 4. Generate Garba Pass PDF ──────────────────────────────
     let pdfBuffer;
     try {
       pdfBuffer = await generateGarbaPDF(registrantData);
       console.log(`✅ PDF generated for ${registrationId}`);
     } catch (pdfErr) {
       console.error('❌ PDF generation failed:', pdfErr);
-      // Don't block — still confirm registration, email with note
+      // Non-fatal — registration is already saved; email will be sent without attachment.
     }
 
-    // ── Send Emails ────────────────────────────────────────────
+    // ── 5. Send Emails ──────────────────────────────────────────
     try {
       if (pdfBuffer) {
         await sendConfirmationEmail(registrantData, pdfBuffer);
@@ -474,10 +568,10 @@ app.post('/verify-payment', async (req, res) => {
       }
     } catch (emailErr) {
       console.error('❌ Email send failed:', emailErr.message);
-      // Don't block — payment is verified regardless
+      // Non-fatal — payment is verified and DB record is saved regardless.
     }
 
-    // ── Respond success ────────────────────────────────────────
+    // ── 6. Respond success ──────────────────────────────────────
     res.json({
       success:        true,
       registrationId,
@@ -492,8 +586,71 @@ app.post('/verify-payment', async (req, res) => {
 });
 
 /**
+ * POST /admin/reset-batch
+ * ────────────────────────
+ * Protected by the ADMIN_RESET_PASSWORD environment variable.
+ * Archives all current active registrations (sets isArchived = true),
+ * which immediately frees all 30 seats for the next batch.
+ *
+ * The old records are NOT deleted — they remain in MongoDB
+ * under the "archived" flag for your records.
+ *
+ * Usage:
+ *   curl -X POST https://your-api.com/admin/reset-batch \
+ *        -H "Content-Type: application/json" \
+ *        -d '{"password": "your_secret_password_here"}'
+ */
+app.post('/admin/reset-batch', async (req, res) => {
+  try {
+    const { password } = req.body;
+
+    // ── Auth check ──────────────────────────────────────────────
+    const adminPassword = process.env.ADMIN_RESET_PASSWORD;
+    if (!adminPassword) {
+      return res.status(503).json({ error: 'Admin reset is not configured on this server.' });
+    }
+    if (!password || password !== adminPassword) {
+      console.warn('⚠️  Unauthorized /admin/reset-batch attempt');
+      return res.status(401).json({ error: 'Unauthorized.' });
+    }
+
+    // ── Count active registrations before archiving ─────────────
+    const activeCount = await Registration.countDocuments({ isArchived: false });
+
+    if (activeCount === 0) {
+      return res.json({
+        success: true,
+        message: 'No active registrations to archive. Batch is already empty.',
+        archivedCount: 0,
+        seatsNowAvailable: BATCH_CAPACITY,
+      });
+    }
+
+    // ── Archive all active registrations ────────────────────────
+    const result = await Registration.updateMany(
+      { isArchived: false },
+      { $set: { isArchived: true } }
+    );
+
+    const archivedCount = result.modifiedCount;
+    console.log(`✅ Admin reset: ${archivedCount} registrations archived. New batch open.`);
+
+    res.json({
+      success:           true,
+      message:           `Batch reset complete. ${archivedCount} registrations archived.`,
+      archivedCount,
+      seatsNowAvailable: BATCH_CAPACITY,
+    });
+
+  } catch (err) {
+    console.error('❌ /admin/reset-batch error:', err);
+    res.status(500).json({ error: 'Failed to reset batch.' });
+  }
+});
+
+/**
  * POST /test-email   (only available in development)
- * Useful to test email + PDF without going through payment
+ * Useful to test email + PDF without going through payment.
  */
 if (process.env.NODE_ENV !== 'production') {
   app.post('/test-email', async (req, res) => {
@@ -508,6 +665,7 @@ if (process.env.NODE_ENV !== 'production') {
         registrationId: generateRegistrationId(),
         paymentId:      'test_pay_' + uuidv4().slice(0,8),
         orderId:        'test_ord_' + uuidv4().slice(0,8),
+        paidAt:         new Date(),
       };
 
       const pdf = await generateGarbaPDF(testData);
@@ -534,7 +692,8 @@ app.use((err, req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`\n🚀 Bliss Out API running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`   CORS origin: ${process.env.FRONTEND_URL || '(all)'}\n`);
+  console.log(`   CORS origin: ${process.env.FRONTEND_URL || '(all)'}`);
+  console.log(`   Batch capacity: ${BATCH_CAPACITY} seats\n`);
 });
 
 module.exports = app;
