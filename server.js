@@ -585,6 +585,26 @@ app.post('/verify-payment', async (req, res) => {
   }
 });
 
+app.post('/admin/students', async (req, res) => {
+  if (req.body.password !== process.env.ADMIN_RESET_PASSWORD) {
+    return res.status(401).json({ success: false, message: 'Unauthorized' });
+  }
+
+  try {
+    const students = await Registration.find({ isArchived: false })
+      .sort({ paidAt: -1, createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      count: students.length,
+      students,
+    });
+  } catch (error) {
+    console.error('Error fetching students:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch students.' });
+  }
+});
+
 /**
  * POST /admin/reset-batch
  * ────────────────────────
