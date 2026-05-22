@@ -17,6 +17,14 @@ const { v4: uuidv4 } = require('uuid');
 const mongoose    = require('mongoose');
 require('dotenv').config();
 
+// ── WHATSAPP UTILITY ─────────────────────────────────────────────
+// Loaded after dotenv so env vars are available inside the module.
+const {
+  uploadMedia,
+  sendWhatsAppText,
+  sendWhatsAppDocument,
+} = require('./utils/whatsapp');
+
 // ── APP INIT ─────────────────────────────────────────────────────
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -42,23 +50,29 @@ mongoose
 /**
  * Registration Schema
  * Holds one document per successful, verified payment.
- * `isArchived` lets the admin reset route move old batches
- * out of the active seat count without deleting real data.
+ * `isArchived`      — lets admin reset route soft-delete old batches.
+ * `whatsappMediaId` — caches the Meta asset ID returned by uploadMedia()
+ *                     so we can re-send the PDF pass on demand without
+ *                     re-uploading the file to Meta on every request.
+ *                     Null until the WhatsApp upload succeeds.
  */
 const registrationSchema = new mongoose.Schema(
   {
-    name:           { type: String, required: true, trim: true },
-    email:          { type: String, required: true, trim: true, lowercase: true },
-    phone:          { type: String, required: true, trim: true },
-    age:            { type: String, required: true },
-    level:          { type: String, required: true },
-    city:           { type: String, required: true },
-    registrationId: { type: String, required: true, unique: true },
-    paymentId:      { type: String, required: true, unique: true },
-    orderId:        { type: String, required: true, unique: true },
-    paidAt:         { type: Date,   required: true },
+    name:             { type: String, required: true, trim: true },
+    email:            { type: String, required: true, trim: true, lowercase: true },
+    phone:            { type: String, required: true, trim: true },
+    age:              { type: String, required: true },
+    level:            { type: String, required: true },
+    city:             { type: String, required: true },
+    registrationId:   { type: String, required: true, unique: true },
+    paymentId:        { type: String, required: true, unique: true },
+    orderId:          { type: String, required: true, unique: true },
+    paidAt:           { type: Date,   required: true },
     // Soft-archive flag — set to true by /admin/reset-batch
-    isArchived:     { type: Boolean, default: false, index: true },
+    isArchived:       { type: Boolean, default: false, index: true },
+    // Cached Meta media ID — populated after first WhatsApp upload.
+    // Optional: null means the upload hasn't been attempted or failed.
+    whatsappMediaId:  { type: String, default: null },
   },
   { timestamps: true }
 );
@@ -485,10 +499,12 @@ app.post('/create-order', async (req, res) => {
  * Order of operations (strict):
  *   1. Validate all required fields.
  *   2. Verify Razorpay HMAC signature.
- *   3. Save registration to MongoDB  ← failsafe: happens BEFORE PDF/email.
+ *   3. Save registration to MongoDB  ← failsafe: happens BEFORE PDF/email/WhatsApp.
  *   4. Generate Garba Pass PDF.
- *   5. Send confirmation emails.
- *   6. Respond with success.
+ *   5. Upload PDF to Meta & cache the mediaId on the DB record.
+ *   6. Send owner WhatsApp notification (non-fatal).
+ *   7. Send confirmation emails (non-fatal).
+ *   8. Respond with success.
  */
 app.post('/verify-payment', async (req, res) => {
   try {
@@ -515,8 +531,9 @@ app.post('/verify-payment', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Payment signature invalid.' });
     }
 
-    // ── 3. Save to MongoDB (BEFORE PDF + email) ─────────────────
-    //    This is the source of truth. If email fails, the record is still safe.
+    // ── 3. Save to MongoDB (BEFORE PDF + notifications) ─────────
+    //    This is the source of truth. If any later step fails, the
+    //    verified payment record is still preserved.
     const registrationId = generateRegistrationId();
 
     const registrantData = {
@@ -532,13 +549,14 @@ app.post('/verify-payment', async (req, res) => {
       paidAt:         new Date(),
     };
 
+    let savedReg; // keep a reference to update whatsappMediaId after upload
+
     try {
-      const reg = new Registration(registrantData);
-      await reg.save();
+      savedReg = new Registration(registrantData);
+      await savedReg.save();
       console.log(`✅ Registration saved to DB: ${registrationId}`);
     } catch (dbErr) {
-      // If it's a duplicate key (same paymentId / orderId), the payment was
-      // already processed — respond gracefully rather than erroring out.
+      // Duplicate key → payment was already processed; respond gracefully.
       if (dbErr.code === 11000) {
         console.warn(`⚠️  Duplicate payment attempt for order ${razorpay_order_id}`);
         return res.status(409).json({
@@ -546,7 +564,7 @@ app.post('/verify-payment', async (req, res) => {
           error: 'This payment has already been processed. Check your email for your Garba Pass.',
         });
       }
-      // Any other DB error is fatal — don't send a pass for a record we couldn't save.
+      // Any other DB error is fatal — don't send a pass we couldn't save.
       throw dbErr;
     }
 
@@ -557,10 +575,58 @@ app.post('/verify-payment', async (req, res) => {
       console.log(`✅ PDF generated for ${registrationId}`);
     } catch (pdfErr) {
       console.error('❌ PDF generation failed:', pdfErr);
-      // Non-fatal — registration is already saved; email will be sent without attachment.
+      // Non-fatal: the DB record is safe; email/WhatsApp will be skipped gracefully.
     }
 
-    // ── 5. Send Emails ──────────────────────────────────────────
+    // ── 5. Upload PDF to Meta & persist the mediaId ─────────────
+    //    Wrapped in its own try/catch so a Meta API outage never
+    //    blocks the payment confirmation response to the student.
+    if (pdfBuffer) {
+      try {
+        const mediaId = await uploadMedia(
+          pdfBuffer,
+          'garba-pass.pdf',
+          'application/pdf'
+        );
+
+        // Persist the media ID on the DB record for later on-demand resends.
+        // We use findByIdAndUpdate rather than savedReg.save() to avoid
+        // any stale-data conflicts if other fields were somehow touched.
+        await Registration.findByIdAndUpdate(savedReg._id, {
+          $set: { whatsappMediaId: mediaId },
+        });
+
+        console.log(`✅ WhatsApp media uploaded for ${registrationId} — mediaId: ${mediaId}`);
+
+        // ── 6. Notify studio owner via WhatsApp ─────────────────
+        //    Fire-and-forget inside the same guard block: owner notification
+        //    failure must never affect the student's success response.
+        try {
+          const ownerPhone = process.env.OWNER_WHATSAPP_NUMBER;
+          if (!ownerPhone) {
+            console.warn('⚠️  OWNER_WHATSAPP_NUMBER not set — skipping owner WhatsApp.');
+          } else {
+            await sendWhatsAppDocument(
+              ownerPhone,
+              mediaId,
+              `GarbaPass_${registrationId}.pdf`,
+              `🆕 New Registration\nName: ${name}\nPhone: ${phone}\nPass ID: ${registrationId}`
+            );
+            console.log(`✅ Owner WhatsApp notification sent for ${registrationId}`);
+          }
+        } catch (ownerWaErr) {
+          // Log the full error for Vercel logs but swallow it — owner
+          // notification is secondary to confirming the student's payment.
+          console.error(`❌ Owner WhatsApp notification failed for ${registrationId}:`, ownerWaErr.message);
+        }
+
+      } catch (waUploadErr) {
+        // The upload itself failed. Log and continue — email still works.
+        console.error(`❌ WhatsApp media upload failed for ${registrationId}:`, waUploadErr.message);
+      }
+    }
+
+    // ── 7. Send confirmation emails ─────────────────────────────
     try {
       if (pdfBuffer) {
         await sendConfirmationEmail(registrantData, pdfBuffer);
@@ -571,7 +637,7 @@ app.post('/verify-payment', async (req, res) => {
       // Non-fatal — payment is verified and DB record is saved regardless.
     }
 
-    // ── 6. Respond success ──────────────────────────────────────
+    // ── 8. Respond success ──────────────────────────────────────
     res.json({
       success:        true,
       registrationId,
@@ -581,6 +647,147 @@ app.post('/verify-payment', async (req, res) => {
 
   } catch (err) {
     console.error('❌ /verify-payment error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
+/**
+ * POST /api/send-whatsapp-pass
+ * ─────────────────────────────
+ * Sends (or re-sends) the Garba Pass PDF to a student via WhatsApp.
+ *
+ * Happy path:
+ *   1. Validate request body.
+ *   2. Look up registration by registrationId.
+ *   3a. If a cached whatsappMediaId exists → send document directly (no re-upload).
+ *   3b. If mediaId is missing (upload failed during /verify-payment) →
+ *       regenerate PDF, re-upload to Meta, persist the new mediaId, then send.
+ *   4. Send a friendly text message alongside the document.
+ *   5. Respond 200.
+ *
+ * This endpoint is intentionally public so the admin page (or a future
+ * "resend" button) can trigger it without extra auth overhead.
+ * Rate-limit it at your CDN/Vercel edge layer if needed.
+ */
+app.post('/api/send-whatsapp-pass', async (req, res) => {
+  try {
+    const { registrationId, phone } = req.body;
+
+    // ── 1. Input validation ─────────────────────────────────────
+    if (!registrationId || !phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Both registrationId and phone are required.',
+      });
+    }
+
+    // Basic phone sanity — must be digits only (E.164 without '+').
+    // The whatsapp util normalises the number further; this guards the DB query.
+    const normalisedPhone = String(phone).replace(/[\s\-\+]/g, '');
+    if (!/^\d{10,15}$/.test(normalisedPhone)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number format. Provide digits only (E.164, no "+").',
+      });
+    }
+
+    // ── 2. Fetch registration from MongoDB ──────────────────────
+    const reg = await Registration.findOne({ registrationId });
+
+    if (!reg) {
+      return res.status(404).json({
+        success: false,
+        error: `No registration found for ID: ${registrationId}`,
+      });
+    }
+
+    // ── 3. Resolve a valid Meta media ID ────────────────────────
+    let mediaId = reg.whatsappMediaId;
+
+    if (!mediaId) {
+      // ── 3b. Fallback: mediaId was never cached (upload failed at
+      //        payment time). Regenerate the PDF and re-upload now.
+      console.warn(`⚠️  No cached mediaId for ${registrationId} — regenerating PDF and re-uploading.`);
+
+      let pdfBuffer;
+      try {
+        pdfBuffer = await generateGarbaPDF({
+          name:           reg.name,
+          email:          reg.email,
+          phone:          reg.phone,
+          age:            reg.age,
+          level:          reg.level,
+          city:           reg.city,
+          registrationId: reg.registrationId,
+          paymentId:      reg.paymentId,
+          orderId:        reg.orderId,
+          paidAt:         reg.paidAt,
+        });
+      } catch (pdfErr) {
+        console.error(`❌ PDF regeneration failed for ${registrationId}:`, pdfErr.message);
+        return res.status(500).json({
+          success: false,
+          error: 'Could not regenerate the pass PDF. Please try again later.',
+        });
+      }
+
+      try {
+        mediaId = await uploadMedia(pdfBuffer, 'garba-pass.pdf', 'application/pdf');
+
+        // Persist the newly acquired mediaId so subsequent requests are instant.
+        await Registration.findByIdAndUpdate(reg._id, {
+          $set: { whatsappMediaId: mediaId },
+        });
+
+        console.log(`✅ Re-uploaded PDF for ${registrationId} — new mediaId: ${mediaId}`);
+      } catch (uploadErr) {
+        console.error(`❌ PDF re-upload to Meta failed for ${registrationId}:`, uploadErr.message);
+        return res.status(502).json({
+          success: false,
+          error: 'Could not upload pass to WhatsApp. Meta API may be unavailable.',
+        });
+      }
+    }
+
+    // ── 4. Send PDF document + friendly text to the student ─────
+    //    Both calls run sequentially — the document first (so the
+    //    student sees the PDF before the text), then the greeting.
+    try {
+      await sendWhatsAppDocument(
+        normalisedPhone,
+        mediaId,
+        `GarbaPass_${registrationId}.pdf`,
+        `🎉 Your Bliss Out Dance Studio Garba Pass is here! Please save this — you'll need it on Day 1.`
+      );
+
+      await sendWhatsAppText(
+        normalisedPhone,
+        `Hi ${reg.name}! 🙏 Your spot in the One-Month Garba Workshop 2025 is confirmed.\n\n` +
+        `📋 Reg ID: ${registrationId}\n` +
+        `📅 Starts: 1st October 2025\n` +
+        `🕐 Timing: 6:30 PM – 8:30 PM (Mon–Sat)\n` +
+        `📍 Venue: Bliss Out Studio, Khandwa MP\n\n` +
+        `See you on the dance floor! 💃🕺`
+      );
+
+      console.log(`✅ WhatsApp pass sent to ${normalisedPhone} for ${registrationId}`);
+    } catch (sendErr) {
+      console.error(`❌ WhatsApp send failed for ${registrationId}:`, sendErr.message);
+      return res.status(502).json({
+        success: false,
+        error: 'Pass upload succeeded but WhatsApp delivery failed. Please try again.',
+      });
+    }
+
+    // ── 5. All done ─────────────────────────────────────────────
+    return res.status(200).json({
+      success: true,
+      message: `Garba Pass sent via WhatsApp to ${normalisedPhone}.`,
+      registrationId,
+    });
+
+  } catch (err) {
+    console.error('❌ /api/send-whatsapp-pass error:', err);
     res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 });
