@@ -683,7 +683,13 @@ app.post('/api/send-whatsapp-pass', async (req, res) => {
 
     // Basic phone sanity — must be digits only (E.164 without '+').
     // The whatsapp util normalises the number further; this guards the DB query.
-    const normalisedPhone = String(phone).replace(/[\s\-\+]/g, '');
+    // Strip spaces, dashes, and plus signs, making it a mutable variable (let)
+let normalisedPhone = String(phone).replace(/[\s\-\+]/g, '');
+
+// If the resulting string is exactly 10 digits, prepend India's country code (91)
+if (normalisedPhone.length === 10) {
+  normalisedPhone = '91' + normalisedPhone;
+}
     if (!/^\d{10,15}$/.test(normalisedPhone)) {
       return res.status(400).json({
         success: false,
