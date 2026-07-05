@@ -7,6 +7,7 @@
 
 'use strict';
 
+const path = require('path'); // add this line if not already present
 const express     = require('express');
 const cors        = require('cors');
 const crypto      = require('crypto');
@@ -145,149 +146,216 @@ function generateRegistrationId() {
 /**
  * Generate the Garba Pass PDF as a Buffer
  */
+// ═══════════════════════════════════════════════════════════════════════════
+//  LAYOUT CONFIGURATION
+//
+//  All values are in PDF points (1 pt = 1/72 in).
+//  The page is 595 × 340 pt — an exact 1.75:1 ratio that matches the
+//  template image (2016 × 1152 px) pixel-for-pixel at 0.2951 scale.
+//
+//  HOW TO CALIBRATE AFTER DEPLOYMENT:
+//    1. POST /test-email  →  receive the generated PDF by email.
+//    2. Open the PDF in any viewer. Measure where text sits vs. where
+//       the template's label dash ends.
+//    3. Nudge x / y in COORDS until the values sit right after the dash.
+//    4. Redeploy. Repeat once or twice until perfect.
+//    No logic changes needed — only numbers inside COORDS.
+// ═══════════════════════════════════════════════════════════════════════════
+const COORDS = {
+
+  // ── Page size ─────────────────────────────────────────────────────────────
+  // Must match the template image aspect ratio (2016/1152 = 1.75 exactly).
+  // Changing these numbers stretches the background — keep the ratio locked.
+  page: {
+    width:  595,   // pt  (A4-width; standard for most PDF viewers)
+    height: 340,   // pt  (= 595 / 1.75 to match template AR)
+  },
+
+  // ── Student Name ──────────────────────────────────────────────────────────
+  // Sits after the "Name-" label printed on the template.
+  // Derived from image pixel position (510 + 160 label-width) × 0.2951.
+  name: {
+    x:           198,    // pt from left — move right if text overlaps the dash
+    y:            83,    // pt from top  — move down if text sits above the line
+    maxWidth:    300,    // pt — text auto-shrinks if wider than this
+    fontSize:     14,    // pt — starting (maximum) size; matches template label ~50 px
+    minFontSize:   7,    // pt — hard floor; prevents unreadably tiny text
+    color:    '#FFFFFF', // white — clearly legible over the hot-pink background
+    font:  'Helvetica-Bold',
+  },
+
+  // ── Phone / Number ────────────────────────────────────────────────────────
+  // Sits after the "Number-" label on the template.
+  // Derived from (510 + 200 label-width) × 0.2951 ≈ 210 pt.
+  phone: {
+    x:           210,
+    y:           104,    // 353 px × 0.2951 ≈ 104 pt
+    maxWidth:    300,
+    fontSize:     14,
+    minFontSize:   7,
+    color:    '#FFFFFF',
+    font:  'Helvetica-Bold',
+  },
+
+  // ── City / Address ────────────────────────────────────────────────────────
+  // Sits after the "Address-" label on the template.
+  // Derived from (510 + 195 label-width) × 0.2951 ≈ 208 pt.
+  city: {
+    x:           208,
+    y:           125,    // 425 px × 0.2951 ≈ 125 pt
+    maxWidth:    300,
+    fontSize:     14,
+    minFontSize:   7,
+    color:    '#FFFFFF',
+    font:  'Helvetica-Bold',
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HELPER — applyFittedText
+//
+//  Sets font + color on the PDFDocument, then steps the font size down in
+//  0.5 pt increments until the rendered string fits inside coord.maxWidth.
+//  Stops at coord.minFontSize so the text never becomes unreadable.
+//
+//  Using lineBreak: false keeps everything on one line regardless of
+//  how PDFKit's internal cursor is positioned — safe after doc.image().
+// ─────────────────────────────────────────────────────────────────────────────
+function applyFittedText(doc, text, coord) {
+  // Guard against null / undefined data fields arriving from the caller
+  const safeText = String(text || '').trim();
+  if (!safeText) return;
+
+  // ── Set font ───────────────────────────────────────────────────────────────
+  // Helvetica-Bold is a standard PDF base font — no external file needed,
+  // works identically on Vercel Serverless and locally.
+  doc.font(coord.font);
+
+  // ── Auto-shrink loop ───────────────────────────────────────────────────────
+  // Start at the maximum configured size, step down until the string fits
+  // or we hit the minimum. doc.widthOfString() uses the current font state.
+  let fontSize = coord.fontSize;
+  doc.fontSize(fontSize);
+
+  while (
+    doc.widthOfString(safeText) > coord.maxWidth &&
+    fontSize > coord.minFontSize
+  ) {
+    fontSize -= 0.5;          // fine-grained step: avoids sudden jumps
+    doc.fontSize(fontSize);
+  }
+
+  // ── Draw ───────────────────────────────────────────────────────────────────
+  doc
+    .fillColor(coord.color)
+    .text(safeText, coord.x, coord.y, {
+      lineBreak: false,        // one line, never wraps
+      baseline: 'top',         // y is the TOP of the text block, not the baseline
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  generateGarbaPDF
+//
+//  Composites student data on top of the PNG template using PDFKit alone —
+//  no Canvas, Sharp, Jimp, or native modules required. Safe for Vercel
+//  Serverless because:
+//    • The template is read from the deployed repo (process.cwd()), not /tmp.
+//    • PDF bytes are accumulated in an in-memory Buffer array, never on disk.
+//    • PDFKit's built-in PNG decoder handles the image without native deps.
+//
+//  @param  {object} data
+//  @param  {string} data.name   – Student's full name
+//  @param  {string} data.phone  – Student's phone number
+//  @param  {string} data.city   – Student's city / address
+//  (Additional fields — email, registrationId, paymentId, etc. — are accepted
+//   in `data` but not rendered here; they remain available for email logic.)
+//
+//  @returns {Promise<Buffer>}
+//    Resolves with the complete PDF bytes as a Node.js Buffer.
+//    Rejects with a descriptive Error if the template file is missing
+//    or if PDFKit encounters a stream error.
+// ─────────────────────────────────────────────────────────────────────────────
 function generateGarbaPDF(data) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
-    const doc    = new PDFDocument({
-      size:    'A5',
-      margins: { top: 40, bottom: 40, left: 50, right: 50 },
+
+    // ── 1. Resolve the template path ────────────────────────────────────────
+    // process.cwd() on Vercel is the root of the deployed repository, so
+    // this resolves to <repo-root>/assets/garba-pass-template.png.
+    // IMPORTANT: the file must be committed to your repo (not .gitignored)
+    // so that Vercel includes it in the serverless function bundle.
+    const templatePath = path.join(
+      process.cwd(),
+      'assets',
+      'garba-pass-template.png',
+    );
+
+    // ── 2. Create the PDF document ──────────────────────────────────────────
+    // Custom page size locks to the template's exact 1.75:1 aspect ratio.
+    // Zero margins on all sides: the background image is full-bleed.
+    // autoFirstPage: true (default) creates the page immediately, so we
+    // can call doc.image() and doc.text() right away without doc.addPage().
+    const doc = new PDFDocument({
+      size:    [COORDS.page.width, COORDS.page.height],
+      margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
+    // ── 3. Buffer the output entirely in memory ─────────────────────────────
+    // On Vercel Serverless the filesystem outside /tmp is read-only and
+    // /tmp is ephemeral. We accumulate chunks here and concatenate once
+    // PDFKit signals it is done via the 'end' event.
+    const chunks = [];
     doc.on('data',  (chunk) => chunks.push(chunk));
     doc.on('end',   ()      => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
+    doc.on('error', reject);   // surface PDFKit stream errors to the caller
 
-    const W = doc.page.width;
-    const H = doc.page.height;
-
-    // ── BACKGROUND ───────────────────────────────────────────────
-    doc.rect(0, 0, W, H).fill('#07060A');
-
-    // Decorative border rect
-    doc.roundedRect(14, 14, W - 28, H - 28, 12)
-       .lineWidth(1.5)
-       .strokeColor('#F5A623')
-       .stroke();
-
-    // Inner border
-    doc.roundedRect(20, 20, W - 40, H - 40, 9)
-       .lineWidth(0.5)
-       .strokeColor('#C8102E')
-       .stroke();
-
-    // ── TOP STRIPE ───────────────────────────────────────────────
-    doc.rect(14, 14, W - 28, 56).fill('#C8102E');
-
-    // Studio Name in stripe
-    doc.font('Helvetica-Bold')
-       .fontSize(11)
-       .fillColor('#FFD166')
-       .text('✦  BLISS OUT DANCE STUDIO  ✦', 0, 26, { align: 'center', width: W });
-
-    doc.font('Helvetica')
-       .fontSize(7.5)
-       .fillColor('rgba(255,255,255,0.8)')
-       .text('Khandwa, Madhya Pradesh, India', 0, 46, { align: 'center', width: W });
-
-    // ── GARBA PASS TITLE ─────────────────────────────────────────
-    doc.font('Helvetica-Bold')
-       .fontSize(22)
-       .fillColor('#F5A623')
-       .text('GARBA PASS', 0, 84, { align: 'center', width: W });
-
-    doc.font('Helvetica')
-       .fontSize(8)
-       .fillColor('#A89BB0')
-       .text('ONE-MONTH GARBA WORKSHOP  2025', 0, 112, {
-         align: 'center', width: W, characterSpacing: 1.5
-       });
-
-    // Divider
-    doc.moveTo(50, 130).lineTo(W - 50, 130).lineWidth(0.5).strokeColor('#F5A623').stroke();
-
-    // ── STUDENT DETAILS ───────────────────────────────────────────
-    const detailY = 146;
-    const col1    = 50;
-    const col2    = W / 2 + 10;
-
-    function detailRow(label, value, x, y, color = '#F9F4EE') {
-      doc.font('Helvetica')
-         .fontSize(7)
-         .fillColor('#A89BB0')
-         .text(label.toUpperCase(), x, y);
-      doc.font('Helvetica-Bold')
-         .fontSize(10.5)
-         .fillColor(color)
-         .text(value, x, y + 11);
+    // ── 4. Draw the background template (full-bleed) ────────────────────────
+    // Passing both width and height stretches the PNG to cover the entire
+    // page with no gaps. PDFKit reads PNG natively via its built-in
+    // deflate decoder — no sharp / jimp / canvas / native module needed.
+    //
+    // doc.image() calls fs.readFileSync() internally. If the file is absent
+    // it throws synchronously, so we catch it here and reject with a message
+    // that tells you exactly what to fix rather than a cryptic stream error.
+    try {
+      doc.image(templatePath, 0, 0, {
+        width:  COORDS.page.width,
+        height: COORDS.page.height,
+      });
+    } catch (imgErr) {
+      reject(new Error(
+        `[generateGarbaPDF] Cannot load template image at:\n` +
+        `  ${templatePath}\n` +
+        `Ensure "assets/garba-pass-template.png" is committed to your ` +
+        `repository and NOT listed in .gitignore or .vercelignore.\n` +
+        `Original error: ${imgErr.message}`,
+      ));
+      // Return without calling doc.end() — the unfinished doc is
+      // garbage-collected; the 'error' listener is a safe no-op after reject.
+      return;
     }
 
-    detailRow('Student Name', data.name,             col1, detailY);
-    detailRow('Reg. ID',      data.registrationId,   col2, detailY, '#FFD166');
+    // ── 5. Overlay student data ─────────────────────────────────────────────
+    // Each call to applyFittedText():
+    //   a) sets the font & color from COORDS
+    //   b) auto-shrinks the font size until the text fits coord.maxWidth
+    //   c) draws the text at the absolute (x, y) position
+    //
+    // The three fields map to the three fill-in-the-blank labels on the
+    // template: "Name-", "Number-", "Address-".
 
-    detailRow('Email',        data.email,             col1, detailY + 44);
-    detailRow('Phone',        data.phone,             col2, detailY + 44);
+    // Student's full name — after "Name-" on the template
+    applyFittedText(doc, data.name,  COORDS.name);
 
-    detailRow('Age',          data.age + ' years',    col1, detailY + 88);
-    detailRow('Level',        data.level.charAt(0).toUpperCase() + data.level.slice(1), col2, detailY + 88);
+    // Student's phone — after "Number-" on the template
+    applyFittedText(doc, data.phone, COORDS.phone);
 
-    // Divider
-    doc.moveTo(50, detailY + 126).lineTo(W - 50, detailY + 126).lineWidth(0.5).strokeColor('#333').stroke();
+    // Student's city / locality — after "Address-" on the template
+    applyFittedText(doc, data.city,  COORDS.city);
 
-    // ── WORKSHOP DETAILS ──────────────────────────────────────────
-    const workshopY = detailY + 136;
-
-    doc.font('Helvetica-Bold').fontSize(8).fillColor('#F5A623')
-       .text('WORKSHOP DETAILS', col1, workshopY, { characterSpacing: 1 });
-
-    const wDetails = [
-      ['📅 Start Date',  '1st October 2025'],
-      ['⏱️ Duration',    '30 Days (Mon–Sat)'],
-      ['🕐 Timing',      '6:30 PM – 8:30 PM'],
-      ['📍 Venue',       'Bliss Out Studio, Khandwa MP'],
-    ];
-
-    wDetails.forEach(([label, value], i) => {
-      const y = workshopY + 16 + i * 18;
-      doc.font('Helvetica').fontSize(7.5).fillColor('#A89BB0').text(label, col1, y);
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#F9F4EE').text(value, col1 + 95, y);
-    });
-
-    // ── PAYMENT INFO ─────────────────────────────────────────────
-    const payY = workshopY + 100;
-
-    doc.rect(col1 - 4, payY, W - col1 * 2 + 8, 44)
-       .fill('#1A1526');
-
-    doc.font('Helvetica').fontSize(7).fillColor('#A89BB0')
-       .text('PAYMENT STATUS', col1 + 4, payY + 7);
-    doc.font('Helvetica-Bold').fontSize(9).fillColor('#4CAF50')
-       .text('✔  PAID  ·  ₹999/-  ·  Via Razorpay', col1 + 4, payY + 20);
-    doc.font('Helvetica').fontSize(7).fillColor('#666')
-       .text(`Payment ID: ${data.paymentId || 'N/A'}`, col1 + 4, payY + 35);
-
-    // ── QR PLACEHOLDER ───────────────────────────────────────────
-    const qrX = W - 90;
-    const qrY = workshopY + 10;
-    doc.rect(qrX, qrY, 54, 54).fill('#1A1526').stroke();
-    doc.font('Helvetica').fontSize(7).fillColor('#333')
-       .text('QR', qrX + 20, qrY + 20);
-
-    // ── BOTTOM STRIP ─────────────────────────────────────────────
-    const stripY = H - 56;
-    doc.rect(14, stripY, W - 28, 42).fill('#1A1526');
-
-    doc.font('Helvetica').fontSize(7).fillColor('#666')
-       .text('📞 +91 89640 33641   ✉ blissout303@gmail.com   🌐 Khandwa, MP',
-             0, stripY + 8, { align: 'center', width: W });
-
-    doc.font('Helvetica').fontSize(6.5).fillColor('#444')
-       .text(`Generated on ${new Date().toLocaleString('en-IN')}  ·  This is a digital pass — no physical pass required.`,
-             0, stripY + 24, { align: 'center', width: W });
-
-    // Mandala decoration (top right)
-    doc.circle(W - 30, 30, 14).lineWidth(0.5).strokeColor('rgba(245,166,35,0.2)').stroke();
-    doc.circle(W - 30, 30, 9).lineWidth(0.3).strokeColor('rgba(245,166,35,0.15)').stroke();
-
+    // ── 6. Finalise ─────────────────────────────────────────────────────────
+    // doc.end() flushes all buffered drawing operations, emits 'end',
+    // which triggers Buffer.concat(chunks) above and resolves the Promise.
     doc.end();
   });
 }
