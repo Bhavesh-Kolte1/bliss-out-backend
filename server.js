@@ -175,8 +175,8 @@ const COORDS = {
   // Sits after the "Name-" label printed on the template.
   // Derived from image pixel position (510 + 160 label-width) × 0.2951.
   name: {
-    x:           198,    // pt from left — move right if text overlaps the dash
-    y:            83,    // pt from top  — move down if text sits above the line
+    x:           288,    // pt from left — move right if text overlaps the dash
+    y:            82,    // pt from top  — move down if text sits above the line
     maxWidth:    300,    // pt — text auto-shrinks if wider than this
     fontSize:     14,    // pt — starting (maximum) size; matches template label ~50 px
     minFontSize:   7,    // pt — hard floor; prevents unreadably tiny text
@@ -188,8 +188,8 @@ const COORDS = {
   // Sits after the "Number-" label on the template.
   // Derived from (510 + 200 label-width) × 0.2951 ≈ 210 pt.
   phone: {
-    x:           210,
-    y:           104,    // 353 px × 0.2951 ≈ 104 pt
+    x:           288,
+    y:           136,    // 353 px × 0.2951 ≈ 104 pt
     maxWidth:    300,
     fontSize:     14,
     minFontSize:   7,
@@ -201,8 +201,8 @@ const COORDS = {
   // Sits after the "Address-" label on the template.
   // Derived from (510 + 195 label-width) × 0.2951 ≈ 208 pt.
   city: {
-    x:           208,
-    y:           125,    // 425 px × 0.2951 ≈ 125 pt
+    x:           288,
+    y:           190,    // 425 px × 0.2951 ≈ 125 pt
     maxWidth:    300,
     fontSize:     14,
     minFontSize:   7,
