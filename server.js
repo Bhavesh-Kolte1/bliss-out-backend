@@ -143,222 +143,191 @@ function generateRegistrationId() {
   return `BLISS-${date}-${rand}`;
 }
 
-/**
- * Generate the Garba Pass PDF as a Buffer
- */
 // ═══════════════════════════════════════════════════════════════════════════
 //  LAYOUT CONFIGURATION
 //
-//  All values are in PDF points (1 pt = 1/72 in).
-//  The page is 595 × 340 pt — an exact 1.75:1 ratio that matches the
-//  template image (2016 × 1152 px) pixel-for-pixel at 0.2951 scale.
+//  Unlike the old COORDS object, this does NOT store per-field value
+//  positions. It stores only physical facts about the template asset,
+//  measured once from garba-pass-template.png (2016×1152 px, scale
+//  595/2016 = 0.295139 pt/px):
 //
-//  HOW TO CALIBRATE AFTER DEPLOYMENT:
-//    1. POST /test-email  →  receive the generated PDF by email.
-//    2. Open the PDF in any viewer. Measure where text sits vs. where
-//       the template's label dash ends.
-//    3. Nudge x / y in COORDS until the values sit right after the dash.
-//    4. Redeploy. Repeat once or twice until perfect.
-//    No logic changes needed — only numbers inside COORDS.
+//    • labelColumnX — the shared left edge where every label begins
+//      (measured: Name-/Number-/Address- all start at px 721-724,
+//      i.e. ≈213 pt — confirmed to be ONE column, not three).
+//
+//    • Per-row y — the top of each label's glyph band (measured:
+//      Name- 377px/111pt, Number- 473px/140pt, Address- 585px/173pt).
+//
+//    • LABEL_STYLE — the font/size that reproduces the template's
+//      (monospaced) label glyph widths. Verified against measured
+//      pixel widths of all three labels (see write-up); accurate to
+//      ~1.5pt, which is visually indistinguishable.
+//
+//  Value x-positions are NEVER stored — they are derived at render
+//  time from doc.widthOfString(), so they automatically stay correct
+//  no matter how long each label or value is.
 // ═══════════════════════════════════════════════════════════════════════════
-const COORDS = {
 
-  // ── Page size ─────────────────────────────────────────────────────────────
-  // Must match the template image aspect ratio (2016/1152 = 1.75 exactly).
-  // Changing these numbers stretches the background — keep the ratio locked.
-  page: {
-    width:  595,   // pt  (A4-width; standard for most PDF viewers)
-    height: 340,   // pt  (= 595 / 1.75 to match template AR)
-  },
+const LAYOUT = {
+  page: { width: 595, height: 340 },
 
-  // ── Student Name ──────────────────────────────────────────────────────────
-  // Sits after the "Name-" label printed on the template.
-  // Derived from image pixel position (510 + 160 label-width) × 0.2951.
-  name: {
-    x:           292,    // pt from left — move right if text overlaps the dash
-    y:            74,    // pt from top  — move down if text sits above the line
-    maxWidth:    215,    // pt — text auto-shrinks if wider than this
-    fontSize:     14,    // pt — starting (maximum) size; matches template label ~50 px
-    minFontSize:   8,    // pt — hard floor; prevents unreadably tiny text
-    color:    '#FFFFFF', // white — clearly legible over the hot-pink background
-    font:  'Helvetica-Bold',
-  },
+  // Shared left column where every printed label begins.
+  labelColumnX: 213,
 
-  // ── Phone / Number ────────────────────────────────────────────────────────
-  // Sits after the "Number-" label on the template.
-  // Derived from (510 + 200 label-width) × 0.2951 ≈ 210 pt.
-  phone: {
-    x:           292,
-    y:           127,    // 353 px × 0.2951 ≈ 104 pt
-    maxWidth:    215,
-    fontSize:     14,
-    minFontSize:   8,
-    color:    '#FFFFFF',
-    font:  'Helvetica-Bold',
-  },
-
-  // ── City / Address ────────────────────────────────────────────────────────
-  // Sits after the "Address-" label on the template.
-  // Derived from (510 + 195 label-width) × 0.2951 ≈ 208 pt.
-  city: {
-    x:           292,
-    y:           180,    // 425 px × 0.2951 ≈ 125 pt
-    maxWidth:    215,
-    fontSize:     14,
-    minFontSize:   8,
-    color:    '#FFFFFF',
-    font:  'Helvetica-Bold',
+  rows: {
+    name: {
+      label:       'Name-',
+      y:           111,             // top of the label's measured glyph band
+      valueFont:   'Helvetica-Bold',
+      valueColor:  '#FFFFFF',
+      maxFontSize: 14,
+      minFontSize: 8,
+      rightMargin: 12,              // pt of breathing room before the page edge
+    },
+    phone: {
+      label:       'Number-',
+      y:           140,
+      valueFont:   'Helvetica-Bold',
+      valueColor:  '#FFFFFF',
+      maxFontSize: 14,
+      minFontSize: 8,
+      rightMargin: 12,
+    },
+    city: {
+      label:       'Address-',
+      y:           173,
+      valueFont:   'Helvetica-Bold',
+      valueColor:  '#FFFFFF',
+      maxFontSize: 14,
+      minFontSize: 8,
+      rightMargin: 12,
+    },
   },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  HELPER — applyFittedText
-//
-//  Sets font + color on the PDFDocument, then steps the font size down in
-//  0.5 pt increments until the rendered string fits inside coord.maxWidth.
-//  Stops at coord.minFontSize so the text never becomes unreadable.
-//
-//  Using lineBreak: false keeps everything on one line regardless of
-//  how PDFKit's internal cursor is positioned — safe after doc.image().
-// ─────────────────────────────────────────────────────────────────────────────
-function applyFittedText(doc, text, coord) {
-  // Guard against null / undefined data fields arriving from the caller
-  const safeText = String(text || '').trim();
-  if (!safeText) return;
+// Font/size/color used to (re)draw the template's labels ourselves.
+// Courier-Bold is one of PDFKit's 14 built-in core fonts — no file to
+// embed, works identically locally and on Vercel. Its fixed 0.6×size
+// advance per glyph is what makes it match the template's monospaced
+// label font. Color sampled directly from the template's label pixels.
+const LABEL_STYLE = {
+  font:     'Courier-Bold',
+  fontSize: 15.8,
+  color:    '#C4D3F2',
+};
 
-  // ── Set font ───────────────────────────────────────────────────────────────
-  // Helvetica-Bold is a standard PDF base font — no external file needed,
-  // works identically on Vercel Serverless and locally.
-  doc.font(coord.font);
+// ─────────────────────────────────────────────────────────────────────────────
+//  HELPER — measureWidth
+//  Thin wrapper so every width lookup goes through one place and always
+//  sets font/size BEFORE measuring (a common PDFKit footgun: widthOfString
+//  silently uses whatever font/size happens to be active).
+// ─────────────────────────────────────────────────────────────────────────────
+function measureWidth(doc, text, font, fontSize) {
+  doc.font(font).fontSize(fontSize);
+  return doc.widthOfString(text);
+}
 
-  // ── Auto-shrink loop ───────────────────────────────────────────────────────
-  // Start at the maximum configured size, step down until the string fits
-  // or we hit the minimum. doc.widthOfString() uses the current font state.
-  let fontSize = coord.fontSize;
+// ─────────────────────────────────────────────────────────────────────────────
+//  HELPER — fitFontSize
+//  Steps the font size down in 0.5pt increments until `text` fits inside
+//  `maxWidth` at `font`, or `minFontSize` is reached. Returns the final
+//  size and leaves doc's font/size state set to it (so the caller can
+//  measure/draw immediately without re-setting anything).
+// ─────────────────────────────────────────────────────────────────────────────
+function fitFontSize(doc, text, { font, maxFontSize, minFontSize, maxWidth, step = 0.5 }) {
+  doc.font(font);
+  let fontSize = maxFontSize;
   doc.fontSize(fontSize);
 
-  while (
-    doc.widthOfString(safeText) > coord.maxWidth &&
-    fontSize > coord.minFontSize
-  ) {
-    fontSize -= 0.5;          // fine-grained step: avoids sudden jumps
+  while (doc.widthOfString(text) > maxWidth && fontSize > minFontSize) {
+    fontSize -= step;
     doc.fontSize(fontSize);
   }
+  return fontSize;
+}
 
-  // ── Draw ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  HELPER — drawLabel
+//  Draws (reinforces) one template label at the shared column, and
+//  returns its exact rendered width. Because we draw it and measure it
+//  with the SAME font/size call, the returned width is not an estimate —
+//  it is the literal metric PDFKit used to lay out those glyphs.
+// ─────────────────────────────────────────────────────────────────────────────
+function drawLabel(doc, row) {
+  const labelWidth = measureWidth(doc, row.label, LABEL_STYLE.font, LABEL_STYLE.fontSize);
+
   doc
-    .fillColor(coord.color)
-    .text(safeText, coord.x, coord.y, {
-      lineBreak: false,        // one line, never wraps
-      baseline: 'top',         // y is the TOP of the text block, not the baseline
+    .fillColor(LABEL_STYLE.color)
+    .text(row.label, LAYOUT.labelColumnX, row.y, {
+      lineBreak: false,
+      baseline:  'top',
     });
+
+  return labelWidth;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  generateGarbaPDF
+//  applyFittedText — complete rewrite
 //
-//  Composites student data on top of the PNG template using PDFKit alone —
-//  no Canvas, Sharp, Jimp, or native modules required. Safe for Vercel
-//  Serverless because:
-//    • The template is read from the deployed repo (process.cwd()), not /tmp.
-//    • PDF bytes are accumulated in an in-memory Buffer array, never on disk.
-//    • PDFKit's built-in PNG decoder handles the image without native deps.
+//  Old behavior: draw `text` at a hard-coded coord.x — correct only for
+//  whichever label that x happened to be calibrated against.
 //
-//  @param  {object} data
-//  @param  {string} data.name   – Student's full name
-//  @param  {string} data.phone  – Student's phone number
-//  @param  {string} data.city   – Student's city / address
-//  (Additional fields — email, registrationId, paymentId, etc. — are accepted
-//   in `data` but not rendered here; they remain available for email logic.)
-//
-//  @returns {Promise<Buffer>}
-//    Resolves with the complete PDF bytes as a Node.js Buffer.
-//    Rejects with a descriptive Error if the template file is missing
-//    or if PDFKit encounters a stream error.
+//  New behavior:
+//    1. Draw the row's label, measuring its exact width.
+//    2. Fit the value's font size to the width ACTUALLY remaining on the
+//       page after that label (dynamic, not a fixed per-field maxWidth).
+//    3. Recompute the space width at the FINAL fitted size (spaces are
+//       narrower at 8pt than at 14pt — using the max-size space would
+//       under-count the gap after shrinking).
+//    4. valueX = labelColumnX + labelWidth + spaceWidth — always exactly
+//       one space after the dash, for any label, any value, any size.
 // ─────────────────────────────────────────────────────────────────────────────
-function generateGarbaPDF(data) {
-  return new Promise((resolve, reject) => {
+function applyFittedText(doc, text, row) {
+  // 1. Label — always drawn, even if the value is empty.
+  const labelWidth = drawLabel(doc, row);
 
-    // ── 1. Resolve the template path ────────────────────────────────────────
-    // process.cwd() on Vercel is the root of the deployed repository, so
-    // this resolves to <repo-root>/assets/garba-pass-template.png.
-    // IMPORTANT: the file must be committed to your repo (not .gitignored)
-    // so that Vercel includes it in the serverless function bundle.
-    const templatePath = path.join(
-      process.cwd(),
-      'assets',
-      'garba-pass-template.png',
-    );
+  const safeText = String(text || '').trim();
+  if (!safeText) return; // nothing to place after the dash
 
-    // ── 2. Create the PDF document ──────────────────────────────────────────
-    // Custom page size locks to the template's exact 1.75:1 aspect ratio.
-    // Zero margins on all sides: the background image is full-bleed.
-    // autoFirstPage: true (default) creates the page immediately, so we
-    // can call doc.image() and doc.text() right away without doc.addPage().
-    const doc = new PDFDocument({
-      size:    [COORDS.page.width, COORDS.page.height],
-      margins: { top: 0, bottom: 0, left: 0, right: 0 },
-    });
+  // 2. Fit value font size to the space actually left on the page.
+  //    (Uses the max-size space width as a first-pass estimate for the
+  //    budget — spaces vary by only a couple pt across the fitting
+  //    range, so this doesn't materially affect the shrink decision.)
+  const provisionalSpace = measureWidth(doc, ' ', row.valueFont, row.maxFontSize);
+  const maxWidth =
+    LAYOUT.page.width -
+    (LAYOUT.labelColumnX + labelWidth + provisionalSpace) -
+    row.rightMargin;
 
-    // ── 3. Buffer the output entirely in memory ─────────────────────────────
-    // On Vercel Serverless the filesystem outside /tmp is read-only and
-    // /tmp is ephemeral. We accumulate chunks here and concatenate once
-    // PDFKit signals it is done via the 'end' event.
-    const chunks = [];
-    doc.on('data',  (chunk) => chunks.push(chunk));
-    doc.on('end',   ()      => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);   // surface PDFKit stream errors to the caller
-
-    // ── 4. Draw the background template (full-bleed) ────────────────────────
-    // Passing both width and height stretches the PNG to cover the entire
-    // page with no gaps. PDFKit reads PNG natively via its built-in
-    // deflate decoder — no sharp / jimp / canvas / native module needed.
-    //
-    // doc.image() calls fs.readFileSync() internally. If the file is absent
-    // it throws synchronously, so we catch it here and reject with a message
-    // that tells you exactly what to fix rather than a cryptic stream error.
-    try {
-      doc.image(templatePath, 0, 0, {
-        width:  COORDS.page.width,
-        height: COORDS.page.height,
-      });
-    } catch (imgErr) {
-      reject(new Error(
-        `[generateGarbaPDF] Cannot load template image at:\n` +
-        `  ${templatePath}\n` +
-        `Ensure "assets/garba-pass-template.png" is committed to your ` +
-        `repository and NOT listed in .gitignore or .vercelignore.\n` +
-        `Original error: ${imgErr.message}`,
-      ));
-      // Return without calling doc.end() — the unfinished doc is
-      // garbage-collected; the 'error' listener is a safe no-op after reject.
-      return;
-    }
-
-    // ── 5. Overlay student data ─────────────────────────────────────────────
-    // Each call to applyFittedText():
-    //   a) sets the font & color from COORDS
-    //   b) auto-shrinks the font size until the text fits coord.maxWidth
-    //   c) draws the text at the absolute (x, y) position
-    //
-    // The three fields map to the three fill-in-the-blank labels on the
-    // template: "Name-", "Number-", "Address-".
-
-    // Student's full name — after "Name-" on the template
-    applyFittedText(doc, data.name,  COORDS.name);
-
-    // Student's phone — after "Number-" on the template
-    applyFittedText(doc, data.phone, COORDS.phone);
-
-    // Student's city / locality — after "Address-" on the template
-    applyFittedText(doc, data.city,  COORDS.city);
-
-    // ── 6. Finalise ─────────────────────────────────────────────────────────
-    // doc.end() flushes all buffered drawing operations, emits 'end',
-    // which triggers Buffer.concat(chunks) above and resolves the Promise.
-    doc.end();
+  const fittedSize = fitFontSize(doc, safeText, {
+    font:        row.valueFont,
+    maxFontSize: row.maxFontSize,
+    minFontSize: row.minFontSize,
+    maxWidth,
   });
+
+  // 3. Exact space width at the size we're actually about to draw with.
+  const spaceWidth = measureWidth(doc, ' ', row.valueFont, fittedSize);
+
+  // 4. Derived, never guessed.
+  const valueX = LAYOUT.labelColumnX + labelWidth + spaceWidth;
+
+  doc.font(row.valueFont).fontSize(fittedSize);
+  doc
+    .fillColor(row.valueColor)
+    .text(safeText, valueX, row.y, {
+      lineBreak: false,
+      baseline:  'top',
+    });
 }
+
+    // ── 5. Overlay labels + student data ────────────────────────────────────
+    // Each row draws its own label AND its value, with the value's x
+    // derived algebraically from the label's measured width — never
+    // a stored coordinate.
+    applyFittedText(doc, data.name,  LAYOUT.rows.name);
+    applyFittedText(doc, data.phone, LAYOUT.rows.phone);
+    applyFittedText(doc, data.city,  LAYOUT.rows.city);
 
 /**
  * Send confirmation email with PDF attachment
