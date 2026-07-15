@@ -323,13 +323,45 @@ function applyFittedText(doc, text, row) {
     });
 }
 
+function generateGarbaPDF(data) {
+  return new Promise((resolve, reject) => {
+
+    // ── 1. Resolve the template path ────────────────────────────────────────
+    const templatePath = path.join(process.cwd(), 'assets', 'garba-pass-template.png');
+
+    // ── 2. Create the PDF document ──────────────────────────────────────────
+    const doc = new PDFDocument({
+      size:    [LAYOUT.page.width, LAYOUT.page.height],
+      margins: { top: 0, bottom: 0, left: 0, right: 0 },
+    });
+
+    // ── 3. Buffer the output entirely in memory ─────────────────────────────
+    const chunks = [];
+    doc.on('data',  (chunk) => chunks.push(chunk));
+    doc.on('end',   ()      => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    // ── 4. Draw the background template (full-bleed) ────────────────────────
+    try {
+      doc.image(templatePath, 0, 0, { width: LAYOUT.page.width, height: LAYOUT.page.height });
+    } catch (imgErr) {
+      reject(new Error(
+        `[generateGarbaPDF] Cannot load template image at:\n  ${templatePath}\n` +
+        `Ensure "assets/garba-pass-template.png" is committed to your repository ` +
+        `and NOT listed in .gitignore or .vercelignore.\nOriginal error: ${imgErr.message}`,
+      ));
+      return;
+    }
+
     // ── 5. Overlay labels + student data ────────────────────────────────────
-    // Each row draws its own label AND its value, with the value's x
-    // derived algebraically from the label's measured width — never
-    // a stored coordinate.
     applyFittedText(doc, data.name,  LAYOUT.rows.name);
     applyFittedText(doc, data.phone, LAYOUT.rows.phone);
     applyFittedText(doc, data.city,  LAYOUT.rows.city);
+
+    // ── 6. Finalise ─────────────────────────────────────────────────────────
+    doc.end();
+  });
+}
 
 /**
  * Send confirmation email with PDF attachment
