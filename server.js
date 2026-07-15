@@ -78,7 +78,9 @@ const registrationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Registration = mongoose.model('Registration', registrationSchema);
+const Registration =
+    mongoose.models.Registration ||
+    mongoose.model('Registration', registrationSchema);
 
 // ── CAPACITY CONFIG ──────────────────────────────────────────────
 const BATCH_CAPACITY = 30;
