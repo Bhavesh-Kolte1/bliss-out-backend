@@ -381,7 +381,7 @@ async function sendConfirmationEmail(data, pdfBuffer) {
         <h2 style="color:#333;font-size:19px;margin-top:0;">🎉 You're Registered!</h2>
         <p style="color:#555;line-height:1.6;">
           Hi <strong>${data.name}</strong>,<br>
-          Your spot in the <strong>One-Month Garba Workshop 2025</strong> is confirmed.
+          Your spot in the <strong>One-Month Garba Workshop 2026</strong> is confirmed.
           Your Garba Pass PDF is attached — please save it; you'll need it on Day 1.
         </p>
         <table style="width:100%;border-collapse:collapse;margin:18px 0;">
@@ -395,11 +395,11 @@ async function sendConfirmationEmail(data, pdfBuffer) {
           </tr>
           <tr style="background:#fdf6ee;">
             <td style="padding:10px 14px;color:#888;font-size:12px;">START DATE</td>
-            <td style="padding:10px 14px;font-size:13px;color:#333;">1st October 2025</td>
+            <td style="padding:10px 14px;font-size:13px;color:#333;">31st October 2026</td>
           </tr>
           <tr>
             <td style="padding:10px 14px;color:#888;font-size:12px;">TIMING</td>
-            <td style="padding:10px 14px;font-size:13px;color:#333;">6:30 PM – 8:30 PM (Mon–Sat)</td>
+            <td style="padding:10px 14px;font-size:13px;color:#333;">5:00 PM – 10:30 PM (Mon–Sat)</td>
           </tr>
           <tr style="background:#fdf6ee;">
             <td style="padding:10px 14px;color:#888;font-size:12px;">VENUE</td>
@@ -450,7 +450,7 @@ async function sendConfirmationEmail(data, pdfBuffer) {
         <p><strong>City:</strong>  ${data.city || 'N/A'}</p>
         <p><strong>Payment ID:</strong> ${data.paymentId}</p>
         <p><strong>Order ID:</strong>   ${data.orderId}</p>
-        <p style="color:#4CAF50;font-weight:bold;">✔ Payment Verified — ₹999</p>
+        <p style="color:#4CAF50;font-weight:bold;">✔ Payment Verified — ₹1223</p>
         <hr/>
         <p style="color:#999;font-size:12px;">Garba Pass PDF is attached.</p>
       </div>`,
