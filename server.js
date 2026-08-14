@@ -5,18 +5,19 @@
  * ═══════════════════════════════════════════════════════════════
  */
 
-'use strict';
+"use strict";
 
-const path = require('path'); // add this line if not already present
-const express     = require('express');
-const cors        = require('cors');
-const crypto      = require('crypto');
-const Razorpay    = require('razorpay');
-const nodemailer  = require('nodemailer');
-const PDFDocument = require('pdfkit');
-const { v4: uuidv4 } = require('uuid');
-const mongoose    = require('mongoose');
-require('dotenv').config();
+const path = require("path"); // add this line if not already present
+const express = require("express");
+const cors = require("cors");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
+const nodemailer = require("nodemailer");
+const PDFDocument = require("pdfkit");
+const { v4: uuidv4 } = require("uuid");
+const mongoose = require("mongoose");
+const fs = require("fs"); // add next to your existing path require
+require("dotenv").config();
 
 // ── WHATSAPP UTILITY ─────────────────────────────────────────────
 // Loaded after dotenv so env vars are available inside the module.
@@ -24,25 +25,25 @@ const {
   uploadMedia,
   sendWhatsAppText,
   sendWhatsAppDocument,
-} = require('./utils/whatsapp');
+} = require("./utils/whatsapp");
 
 // ── APP INIT ─────────────────────────────────────────────────────
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ── MONGOOSE CONNECTION ──────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
-  console.error('❌ MONGO_URI is not set in .env — exiting.');
+  console.error("❌ MONGO_URI is not set in .env — exiting.");
   process.exit(1);
 }
 
 mongoose
   .connect(MONGO_URI)
-  .then(() => console.log('✅ MongoDB connected'))
+  .then(() => console.log("✅ MongoDB connected"))
   .catch((err) => {
-    console.error('❌ MongoDB connection error:', err.message);
+    console.error("❌ MongoDB connection error:", err.message);
     process.exit(1);
   });
 
@@ -59,28 +60,28 @@ mongoose
  */
 const registrationSchema = new mongoose.Schema(
   {
-    name:             { type: String, required: true, trim: true },
-    email:            { type: String, required: true, trim: true, lowercase: true },
-    phone:            { type: String, required: true, trim: true },
-    age:              { type: String, required: true },
-    level:            { type: String, required: true },
-    city:             { type: String, required: true },
-    registrationId:   { type: String, required: true, unique: true },
-    paymentId:        { type: String, required: true, unique: true },
-    orderId:          { type: String, required: true, unique: true },
-    paidAt:           { type: Date,   required: true },
+    name: { type: String, required: true, trim: true },
+    email: { type: String, required: true, trim: true, lowercase: true },
+    phone: { type: String, required: true, trim: true },
+    age: { type: String, required: true },
+    level: { type: String, required: true },
+    city: { type: String, required: true },
+    registrationId: { type: String, required: true, unique: true },
+    paymentId: { type: String, required: true, unique: true },
+    orderId: { type: String, required: true, unique: true },
+    paidAt: { type: Date, required: true },
     // Soft-archive flag — set to true by /admin/reset-batch
-    isArchived:       { type: Boolean, default: false, index: true },
+    isArchived: { type: Boolean, default: false, index: true },
     // Cached Meta media ID — populated after first WhatsApp upload.
     // Optional: null means the upload hasn't been attempted or failed.
-    whatsappMediaId:  { type: String, default: null },
+    whatsappMediaId: { type: String, default: null },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const Registration =
-    mongoose.models.Registration ||
-    mongoose.model('Registration', registrationSchema);
+  mongoose.models.Registration ||
+  mongoose.model("Registration", registrationSchema);
 
 // ── CAPACITY CONFIG ──────────────────────────────────────────────
 const BATCH_CAPACITY = 30;
@@ -91,45 +92,47 @@ app.use(express.urlencoded({ extended: true }));
 
 // CORS — allow your GitHub Pages URL (and localhost for development)
 const allowedOrigins = [
-  process.env.FRONTEND_URL,             // e.g. https://yourusername.github.io
-  'http://localhost:3000',
-  'http://127.0.0.1:5500',
-  'http://localhost:5500',
+  process.env.FRONTEND_URL, // e.g. https://yourusername.github.io
+  "http://localhost:3000",
+  "http://127.0.0.1:5500",
+  "http://localhost:5500",
   // Add the exact GitHub Pages URL below:
   // 'https://yourusername.github.io',
 ];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error(`CORS: Origin ${origin} not allowed.`));
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, curl, Postman)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      callback(new Error(`CORS: Origin ${origin} not allowed.`));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  }),
+);
 
 // ── RAZORPAY CLIENT ──────────────────────────────────────────────
 const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
+  key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 // ── NODEMAILER TRANSPORTER ───────────────────────────────────────
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  service: "gmail",
   auth: {
-    user: process.env.EMAIL_USER,    // blissout303@gmail.com
-    pass: process.env.EMAIL_PASS,    // Gmail App Password (16-char)
+    user: process.env.EMAIL_USER, // blissout303@gmail.com
+    pass: process.env.EMAIL_PASS, // Gmail App Password (16-char)
   },
 });
 
 // Verify SMTP connection on startup
 transporter.verify((err) => {
-  if (err) console.error('❌ Email transporter error:', err.message);
-  else     console.log('✅ Email transporter ready');
+  if (err) console.error("❌ Email transporter error:", err.message);
+  else console.log("✅ Email transporter ready");
 });
 
 // ── UTILITY FUNCTIONS ────────────────────────────────────────────
@@ -139,226 +142,165 @@ transporter.verify((err) => {
  * Format: BLISS-YYYYMMDD-XXXX
  */
 function generateRegistrationId() {
-  const now   = new Date();
-  const date  = now.toISOString().slice(0,10).replace(/-/g,'');
-  const rand  = Math.random().toString(36).slice(2,6).toUpperCase();
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10).replace(/-/g, "");
+  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `BLISS-${date}-${rand}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  LAYOUT CONFIGURATION
+//  PASS_LAYOUT — new-garba-pass-template.png (2048×661 px)
 //
-//  Unlike the old COORDS object, this does NOT store per-field value
-//  positions. It stores only physical facts about the template asset,
-//  measured once from garba-pass-template.png (2016×1152 px, scale
-//  595/2016 = 0.295139 pt/px):
+//  This template already contains the "NAME -", "PHONE -", "NAME -" labels
+//  and their underlines baked into the PNG — nothing is redrawn here, only
+//  the three dynamic values are overlaid on the existing blank lines.
 //
-//    • labelColumnX — the shared left edge where every label begins
-//      (measured: Name-/Number-/Address- all start at px 721-724,
-//      i.e. ≈213 pt — confirmed to be ONE column, not three).
+//  Coordinates below were measured directly from the PNG (not guessed):
+//  each label's glyph bounding box and each underline's pixel run were
+//  located by isolating the template's maroon ink color and scanning for
+//  contiguous horizontal runs / glyph clusters.
 //
-//    • Per-row y — the top of each label's glyph band (measured:
-//      Name- 377px/111pt, Number- 473px/140pt, Address- 585px/173pt).
+//    scale = PAGE_WIDTH / 2048 = 0.5   (PAGE_WIDTH chosen as 1024 for a
+//                                       clean 1px : 0.5pt conversion)
 //
-//    • LABEL_STYLE — the font/size that reproduces the template's
-//      (monospaced) label glyph widths. Verified against measured
-//      pixel widths of all three labels (see write-up); accurate to
-//      ~1.5pt, which is visually indistinguishable.
+//  Measured (px)                          → pt (× 0.5)
+//    LEFT NAME  label x:124-244  y:461-484   underline x:283-1214 y:492
+//    LEFT PHONE label x:127-263  y:528-551   underline x:283-1214 y:562
+//    RIGHT NAME label x:1442-1525 y:547-562  underline x:1555-1940 y:569
 //
-//  Value x-positions are NEVER stored — they are derived at render
-//  time from doc.widthOfString(), so they automatically stay correct
-//  no matter how long each label or value is.
+//  x is set a few pt to the right of where each underline begins (never
+//  touching the label); y is the text baseline, ~3pt above its underline
+//  so the value visually sits ON the line like handwriting; maxWidth stops
+//  a few pt short of the underline's right end / the right-section border.
 // ═══════════════════════════════════════════════════════════════════════════
+const PASS_LAYOUT = {
+  page: { width: 1024, height: 330.5 }, // 1024 × (661/2048), exact aspect match
 
-const LAYOUT = {
-  page: { width: 595, height: 340 },
+  leftName: { x: 150, y: 243, maxWidth: 445, maxFontSize: 20, minFontSize: 9 },
+  leftPhone: { x: 150, y: 278, maxWidth: 445, maxFontSize: 20, minFontSize: 9 },
+  rightName: { x: 785, y: 282, maxWidth: 175, maxFontSize: 15, minFontSize: 8 },
 
-  // Shared left column where every printed label begins.
-  labelColumnX: 213,
-
-  rows: {
-    name: {
-      label:       'Name-',
-      y:           111,             // top of the label's measured glyph band
-      valueFont:   'Helvetica-Bold',
-      valueColor:  '#FFFFFF',
-      maxFontSize: 14,
-      minFontSize: 8,
-      rightMargin: 12,              // pt of breathing room before the page edge
-    },
-    phone: {
-      label:       'Number-',
-      y:           140,
-      valueFont:   'Helvetica-Bold',
-      valueColor:  '#FFFFFF',
-      maxFontSize: 14,
-      minFontSize: 8,
-      rightMargin: 12,
-    },
-    city: {
-      label:       'Address-',
-      y:           173,
-      valueFont:   'Helvetica-Bold',
-      valueColor:  '#FFFFFF',
-      maxFontSize: 14,
-      minFontSize: 8,
-      rightMargin: 12,
-    },
-  },
+  inkColor: "#691415", // sampled directly from the template's label ink
 };
 
-// Font/size/color used to (re)draw the template's labels ourselves.
-// Courier-Bold is one of PDFKit's 14 built-in core fonts — no file to
-// embed, works identically locally and on Vercel. Its fixed 0.6×size
-// advance per glyph is what makes it match the template's monospaced
-// label font. Color sampled directly from the template's label pixels.
-const LABEL_STYLE = {
-  font:     'Courier-Bold',
-  fontSize: 15.8,
-  color:    '#C4D3F2',
-};
+// Atteron font file — bundled in the repo, not a system/Google font.
+const ATTERON_FONT_PATH = path.join(
+  process.cwd(),
+  "assets",
+  "fonts",
+  "Atteron.ttf", // change to "Atteron.otf" if that's the format you have
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  HELPER — measureWidth
-//  Thin wrapper so every width lookup goes through one place and always
-//  sets font/size BEFORE measuring (a common PDFKit footgun: widthOfString
-//  silently uses whatever font/size happens to be active).
+//  HELPER — fitAtteronFontSize
+//  Shrinks fontSize (in 0.5pt steps) until `text` fits `maxWidth`, measuring
+//  with Atteron itself (never a substitute font) so the size chosen here is
+//  exactly what will be drawn.
 // ─────────────────────────────────────────────────────────────────────────────
-function measureWidth(doc, text, font, fontSize) {
-  doc.font(font).fontSize(fontSize);
-  return doc.widthOfString(text);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  HELPER — fitFontSize
-//  Steps the font size down in 0.5pt increments until `text` fits inside
-//  `maxWidth` at `font`, or `minFontSize` is reached. Returns the final
-//  size and leaves doc's font/size state set to it (so the caller can
-//  measure/draw immediately without re-setting anything).
-// ─────────────────────────────────────────────────────────────────────────────
-function fitFontSize(doc, text, { font, maxFontSize, minFontSize, maxWidth, step = 0.5 }) {
-  doc.font(font);
+function fitAtteronFontSize(doc, text, { maxFontSize, minFontSize, maxWidth }) {
+  doc.font("Atteron");
   let fontSize = maxFontSize;
   doc.fontSize(fontSize);
 
   while (doc.widthOfString(text) > maxWidth && fontSize > minFontSize) {
-    fontSize -= step;
+    fontSize -= 0.5;
     doc.fontSize(fontSize);
   }
   return fontSize;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  HELPER — drawLabel
-//  Draws (reinforces) one template label at the shared column, and
-//  returns its exact rendered width. Because we draw it and measure it
-//  with the SAME font/size call, the returned width is not an estimate —
-//  it is the literal metric PDFKit used to lay out those glyphs.
+//  HELPER — drawDynamicText
+//  Draws one value (name/phone) onto an existing template line. Does NOT
+//  draw any label — the PNG already contains "NAME -" / "PHONE -".
 // ─────────────────────────────────────────────────────────────────────────────
-function drawLabel(doc, row) {
-  const labelWidth = measureWidth(doc, row.label, LABEL_STYLE.font, LABEL_STYLE.fontSize);
+function drawDynamicText(doc, text, field) {
+  const safeText = String(text || "").trim();
+  if (!safeText) return;
 
-  doc
-    .fillColor(LABEL_STYLE.color)
-    .text(row.label, LAYOUT.labelColumnX, row.y, {
-      lineBreak: false,
-      baseline:  'top',
-    });
-
-  return labelWidth;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  applyFittedText — complete rewrite
-//
-//  Old behavior: draw `text` at a hard-coded coord.x — correct only for
-//  whichever label that x happened to be calibrated against.
-//
-//  New behavior:
-//    1. Draw the row's label, measuring its exact width.
-//    2. Fit the value's font size to the width ACTUALLY remaining on the
-//       page after that label (dynamic, not a fixed per-field maxWidth).
-//    3. Recompute the space width at the FINAL fitted size (spaces are
-//       narrower at 8pt than at 14pt — using the max-size space would
-//       under-count the gap after shrinking).
-//    4. valueX = labelColumnX + labelWidth + spaceWidth — always exactly
-//       one space after the dash, for any label, any value, any size.
-// ─────────────────────────────────────────────────────────────────────────────
-function applyFittedText(doc, text, row) {
-  // 1. Label — always drawn, even if the value is empty.
-  const labelWidth = drawLabel(doc, row);
-
-  const safeText = String(text || '').trim();
-  if (!safeText) return; // nothing to place after the dash
-
-  // 2. Fit value font size to the space actually left on the page.
-  //    (Uses the max-size space width as a first-pass estimate for the
-  //    budget — spaces vary by only a couple pt across the fitting
-  //    range, so this doesn't materially affect the shrink decision.)
-  const provisionalSpace = measureWidth(doc, ' ', row.valueFont, row.maxFontSize);
-  const maxWidth =
-    LAYOUT.page.width -
-    (LAYOUT.labelColumnX + labelWidth + provisionalSpace) -
-    row.rightMargin;
-
-  const fittedSize = fitFontSize(doc, safeText, {
-    font:        row.valueFont,
-    maxFontSize: row.maxFontSize,
-    minFontSize: row.minFontSize,
-    maxWidth,
+  const fontSize = fitAtteronFontSize(doc, safeText, {
+    maxFontSize: field.maxFontSize,
+    minFontSize: field.minFontSize,
+    maxWidth: field.maxWidth,
   });
 
-  // 3. Exact space width at the size we're actually about to draw with.
-  const spaceWidth = measureWidth(doc, ' ', row.valueFont, fittedSize);
-
-  // 4. Derived, never guessed.
-  const valueX = LAYOUT.labelColumnX + labelWidth + spaceWidth;
-
-  doc.font(row.valueFont).fontSize(fittedSize);
   doc
-    .fillColor(row.valueColor)
-    .text(safeText, valueX, row.y, {
+    .font("Atteron")
+    .fontSize(fontSize)
+    .fillColor(PASS_LAYOUT.inkColor)
+    .text(safeText, field.x, field.y, {
       lineBreak: false,
-      baseline:  'top',
+      baseline: "alphabetic",
     });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  generateGarbaPDF
+//
+//  Composites customer data on top of new-garba-pass-template.png using
+//  PDFKit alone. Interface unchanged: still returns Promise<Buffer>, still
+//  called as generateGarbaPDF(data) from every existing flow.
+// ─────────────────────────────────────────────────────────────────────────────
 function generateGarbaPDF(data) {
   return new Promise((resolve, reject) => {
+    // ── 1. Resolve asset paths ──────────────────────────────────────────────
+    const templatePath = path.join(
+      process.cwd(),
+      "assets",
+      "new-garba-pass-template.png",
+    );
 
-    // ── 1. Resolve the template path ────────────────────────────────────────
-    const templatePath = path.join(process.cwd(), 'assets', 'garba-pass-template.png');
+    if (!fs.existsSync(ATTERON_FONT_PATH)) {
+      reject(
+        new Error(
+          `[generateGarbaPDF] Cannot load Atteron font at:\n  ${ATTERON_FONT_PATH}\n` +
+            `Ensure "assets/fonts/Atteron.ttf" (or .otf) is committed to your ` +
+            `repository and NOT listed in .gitignore or .vercelignore.`,
+        ),
+      );
+      return;
+    }
 
     // ── 2. Create the PDF document ──────────────────────────────────────────
     const doc = new PDFDocument({
-      size:    [LAYOUT.page.width, LAYOUT.page.height],
+      size: [PASS_LAYOUT.page.width, PASS_LAYOUT.page.height],
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
     // ── 3. Buffer the output entirely in memory ─────────────────────────────
     const chunks = [];
-    doc.on('data',  (chunk) => chunks.push(chunk));
-    doc.on('end',   ()      => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
 
-    // ── 4. Draw the background template (full-bleed) ────────────────────────
+    // ── 4. Draw the background template (full-bleed, exact aspect ratio) ────
     try {
-      doc.image(templatePath, 0, 0, { width: LAYOUT.page.width, height: LAYOUT.page.height });
+      doc.image(templatePath, 0, 0, {
+        width: PASS_LAYOUT.page.width,
+        height: PASS_LAYOUT.page.height,
+      });
     } catch (imgErr) {
-      reject(new Error(
-        `[generateGarbaPDF] Cannot load template image at:\n  ${templatePath}\n` +
-        `Ensure "assets/garba-pass-template.png" is committed to your repository ` +
-        `and NOT listed in .gitignore or .vercelignore.\nOriginal error: ${imgErr.message}`,
-      ));
+      reject(
+        new Error(
+          `[generateGarbaPDF] Cannot load template image at:\n  ${templatePath}\n` +
+            `Ensure "assets/new-garba-pass-template.png" is committed to your ` +
+            `repository and NOT listed in .gitignore or .vercelignore.\n` +
+            `Original error: ${imgErr.message}`,
+        ),
+      );
       return;
     }
 
-    // ── 5. Overlay labels + student data ────────────────────────────────────
-    applyFittedText(doc, data.name,  LAYOUT.rows.name);
-    applyFittedText(doc, data.phone, LAYOUT.rows.phone);
-    applyFittedText(doc, data.city,  LAYOUT.rows.city);
+    // ── 5. Register Atteron ──────────────────────────────────────────────────
+    doc.registerFont("Atteron", ATTERON_FONT_PATH);
 
-    // ── 6. Finalise ─────────────────────────────────────────────────────────
+    // ── 6. Overlay the three dynamic values onto the existing blank lines ───
+    drawDynamicText(doc, data.name, PASS_LAYOUT.leftName);
+    drawDynamicText(doc, data.phone, PASS_LAYOUT.leftPhone);
+    drawDynamicText(doc, data.name, PASS_LAYOUT.rightName);
+    // data.city is intentionally never drawn — no address field on this pass.
+
+    // ── 7. Finalise ───────────────────────────────────────────────────────────
     doc.end();
   });
 }
@@ -422,21 +364,23 @@ async function sendConfirmationEmail(data, pdfBuffer) {
 
   // Email to registrant
   const studentMail = {
-    from:        `"Bliss Out Dance Studio" <${process.env.EMAIL_USER}>`,
-    to:          data.email,
-    subject:     `🎉 Your Garba Pass is Here! Registration Confirmed — ${data.registrationId}`,
-    html:        htmlBody,
-    attachments: [{
-      filename:    `GarbaPass_${data.registrationId}.pdf`,
-      content:     pdfBuffer,
-      contentType: 'application/pdf',
-    }],
+    from: `"Bliss Out Dance Studio" <${process.env.EMAIL_USER}>`,
+    to: data.email,
+    subject: `🎉 Your Garba Pass is Here! Registration Confirmed — ${data.registrationId}`,
+    html: htmlBody,
+    attachments: [
+      {
+        filename: `GarbaPass_${data.registrationId}.pdf`,
+        content: pdfBuffer,
+        contentType: "application/pdf",
+      },
+    ],
   };
 
   // Notification to studio owner
   const ownerMail = {
-    from:    `"Bliss Out Registrations" <${process.env.EMAIL_USER}>`,
-    to:      process.env.STUDIO_EMAIL || 'blissout303@gmail.com',
+    from: `"Bliss Out Registrations" <${process.env.EMAIL_USER}>`,
+    to: process.env.STUDIO_EMAIL || "blissout303@gmail.com",
     subject: `🆕 New Registration — ${data.name} (${data.registrationId})`,
     html: `
       <div style="font-family:Arial,sans-serif;padding:24px;max-width:520px;">
@@ -447,18 +391,20 @@ async function sendConfirmationEmail(data, pdfBuffer) {
         <p><strong>Phone:</strong> ${data.phone}</p>
         <p><strong>Age:</strong>   ${data.age}</p>
         <p><strong>Level:</strong> ${data.level}</p>
-        <p><strong>City:</strong>  ${data.city || 'N/A'}</p>
+        <p><strong>City:</strong>  ${data.city || "N/A"}</p>
         <p><strong>Payment ID:</strong> ${data.paymentId}</p>
         <p><strong>Order ID:</strong>   ${data.orderId}</p>
         <p style="color:#4CAF50;font-weight:bold;">✔ Payment Verified — ₹1223</p>
         <hr/>
         <p style="color:#999;font-size:12px;">Garba Pass PDF is attached.</p>
       </div>`,
-    attachments: [{
-      filename:    `GarbaPass_${data.registrationId}.pdf`,
-      content:     pdfBuffer,
-      contentType: 'application/pdf',
-    }],
+    attachments: [
+      {
+        filename: `GarbaPass_${data.registrationId}.pdf`,
+        content: pdfBuffer,
+        contentType: "application/pdf",
+      },
+    ],
   };
 
   await Promise.all([
@@ -470,29 +416,29 @@ async function sendConfirmationEmail(data, pdfBuffer) {
 // ── ROUTES ───────────────────────────────────────────────────────
 
 // Health check
-app.get('/', (req, res) => {
+app.get("/", (req, res) => {
   res.json({
-    status:  'running',
-    service: 'Bliss Out Dance Studio API',
-    version: '2.0.0',
-    time:    new Date().toISOString(),
+    status: "running",
+    service: "Bliss Out Dance Studio API",
+    version: "2.0.0",
+    time: new Date().toISOString(),
   });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 // ── Seat availability (public) ────────────────────────────────────
-app.get('/seats', async (req, res) => {
+app.get("/seats", async (req, res) => {
   try {
     const filled = await Registration.countDocuments({ isArchived: false });
     res.json({
-      capacity:  BATCH_CAPACITY,
+      capacity: BATCH_CAPACITY,
       filled,
       available: Math.max(0, BATCH_CAPACITY - filled),
     });
   } catch (err) {
-    console.error('❌ /seats error:', err);
-    res.status(500).json({ error: 'Could not fetch seat count.' });
+    console.error("❌ /seats error:", err);
+    res.status(500).json({ error: "Could not fetch seat count." });
   }
 });
 
@@ -504,63 +450,67 @@ app.get('/seats', async (req, res) => {
  *   2. Active batch must have fewer than BATCH_CAPACITY registrations.
  * Only then is a Razorpay order created.
  */
-app.post('/create-order', async (req, res) => {
+app.post("/create-order", async (req, res) => {
   try {
     const { amount, name, email, phone, city } = req.body;
 
     // ── 1. Required field check ─────────────────────────────────
     if (!amount || !name || !email || !phone || !city) {
-      return res.status(400).json({ error: 'Missing required fields.' });
+      return res.status(400).json({ error: "Missing required fields." });
     }
 
     // ── 2. City validation — Khandwa residents only ─────────────
-    if (city.trim().toLowerCase() !== 'khandwa') {
+    if (city.trim().toLowerCase() !== "khandwa") {
       return res.status(400).json({
-        error: 'Registrations are currently open for Khandwa residents only.',
+        error: "Registrations are currently open for Khandwa residents only.",
       });
     }
 
     // ── 3. Amount sanity check ──────────────────────────────────
     const amt = parseInt(amount);
     if (isNaN(amt) || amt < 100 || amt > 10_000_000) {
-      return res.status(400).json({ error: 'Invalid amount.' });
+      return res.status(400).json({ error: "Invalid amount." });
     }
 
     // ── 4. Capacity gate — count active (non-archived) seats ────
-    const activeCount = await Registration.countDocuments({ isArchived: false });
+    const activeCount = await Registration.countDocuments({
+      isArchived: false,
+    });
     if (activeCount >= BATCH_CAPACITY) {
       return res.status(400).json({
-        error: `This batch is full (${BATCH_CAPACITY}/${BATCH_CAPACITY} seats taken). ` +
-               'Please check back when the next batch opens.',
+        error:
+          `This batch is full (${BATCH_CAPACITY}/${BATCH_CAPACITY} seats taken). ` +
+          "Please check back when the next batch opens.",
         seatsAvailable: 0,
       });
     }
 
     // ── 5. Create Razorpay order ────────────────────────────────
     const order = await razorpay.orders.create({
-      amount:   amt,
-      currency: 'INR',
-      receipt:  `rcpt_${Date.now()}`,
+      amount: amt,
+      currency: "INR",
+      receipt: `rcpt_${Date.now()}`,
       notes: {
         name,
         email,
         phone,
         city,
-        studio: 'Bliss Out Dance Studio',
-        event:  'Garba Workshop 2025',
+        studio: "Bliss Out Dance Studio",
+        event: "Garba Workshop 2025",
       },
     });
 
     res.json({
-      orderId:        order.id,
-      amount:         order.amount,
-      currency:       order.currency,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
       seatsRemaining: BATCH_CAPACITY - activeCount - 1, // optimistic
     });
-
   } catch (err) {
-    console.error('❌ /create-order error:', err);
-    res.status(500).json({ error: 'Failed to create order. Please try again.' });
+    console.error("❌ /create-order error:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to create order. Please try again." });
   }
 });
 
@@ -577,29 +527,38 @@ app.post('/create-order', async (req, res) => {
  *   7. Send confirmation emails (non-fatal).
  *   8. Respond with success.
  */
-app.post('/verify-payment', async (req, res) => {
+app.post("/verify-payment", async (req, res) => {
   try {
     const {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
-      name, email, phone, age, level, city,
+      name,
+      email,
+      phone,
+      age,
+      level,
+      city,
     } = req.body;
 
     // ── 1. Validate input ───────────────────────────────────────
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-      return res.status(400).json({ success: false, error: 'Missing payment fields.' });
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing payment fields." });
     }
 
     // ── 2. Verify Razorpay signature ────────────────────────────
     const expectedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-      .digest('hex');
+      .digest("hex");
 
     if (expectedSignature !== razorpay_signature) {
       console.warn(`⚠️  Signature mismatch for order ${razorpay_order_id}`);
-      return res.status(400).json({ success: false, error: 'Payment signature invalid.' });
+      return res
+        .status(400)
+        .json({ success: false, error: "Payment signature invalid." });
     }
 
     // ── 3. Save to MongoDB (BEFORE PDF + notifications) ─────────
@@ -612,12 +571,12 @@ app.post('/verify-payment', async (req, res) => {
       email,
       phone,
       age,
-      level:          level || 'beginner',
-      city:           city  || 'Khandwa',
+      level: level || "beginner",
+      city: city || "Khandwa",
       registrationId,
-      paymentId:      razorpay_payment_id,
-      orderId:        razorpay_order_id,
-      paidAt:         new Date(),
+      paymentId: razorpay_payment_id,
+      orderId: razorpay_order_id,
+      paidAt: new Date(),
     };
 
     let savedReg; // keep a reference to update whatsappMediaId after upload
@@ -629,10 +588,13 @@ app.post('/verify-payment', async (req, res) => {
     } catch (dbErr) {
       // Duplicate key → payment was already processed; respond gracefully.
       if (dbErr.code === 11000) {
-        console.warn(`⚠️  Duplicate payment attempt for order ${razorpay_order_id}`);
+        console.warn(
+          `⚠️  Duplicate payment attempt for order ${razorpay_order_id}`,
+        );
         return res.status(409).json({
           success: false,
-          error: 'This payment has already been processed. Check your email for your Garba Pass.',
+          error:
+            "This payment has already been processed. Check your email for your Garba Pass.",
         });
       }
       // Any other DB error is fatal — don't send a pass we couldn't save.
@@ -645,7 +607,7 @@ app.post('/verify-payment', async (req, res) => {
       pdfBuffer = await generateGarbaPDF(registrantData);
       console.log(`✅ PDF generated for ${registrationId}`);
     } catch (pdfErr) {
-      console.error('❌ PDF generation failed:', pdfErr);
+      console.error("❌ PDF generation failed:", pdfErr);
       // Non-fatal: the DB record is safe; email/WhatsApp will be skipped gracefully.
     }
 
@@ -656,8 +618,8 @@ app.post('/verify-payment', async (req, res) => {
       try {
         const mediaId = await uploadMedia(
           pdfBuffer,
-          'garba-pass.pdf',
-          'application/pdf'
+          "garba-pass.pdf",
+          "application/pdf",
         );
 
         // Persist the media ID on the DB record for later on-demand resends.
@@ -667,7 +629,9 @@ app.post('/verify-payment', async (req, res) => {
           $set: { whatsappMediaId: mediaId },
         });
 
-        console.log(`✅ WhatsApp media uploaded for ${registrationId} — mediaId: ${mediaId}`);
+        console.log(
+          `✅ WhatsApp media uploaded for ${registrationId} — mediaId: ${mediaId}`,
+        );
 
         // ── 6. Notify studio owner via WhatsApp ─────────────────
         //    Fire-and-forget inside the same guard block: owner notification
@@ -675,25 +639,34 @@ app.post('/verify-payment', async (req, res) => {
         try {
           const ownerPhone = process.env.OWNER_WHATSAPP_NUMBER;
           if (!ownerPhone) {
-            console.warn('⚠️  OWNER_WHATSAPP_NUMBER not set — skipping owner WhatsApp.');
+            console.warn(
+              "⚠️  OWNER_WHATSAPP_NUMBER not set — skipping owner WhatsApp.",
+            );
           } else {
             await sendWhatsAppDocument(
               ownerPhone,
               mediaId,
               `GarbaPass_${registrationId}.pdf`,
-              `🆕 New Registration\nName: ${name}\nPhone: ${phone}\nPass ID: ${registrationId}`
+              `🆕 New Registration\nName: ${name}\nPhone: ${phone}\nPass ID: ${registrationId}`,
             );
-            console.log(`✅ Owner WhatsApp notification sent for ${registrationId}`);
+            console.log(
+              `✅ Owner WhatsApp notification sent for ${registrationId}`,
+            );
           }
         } catch (ownerWaErr) {
           // Log the full error for Vercel logs but swallow it — owner
           // notification is secondary to confirming the student's payment.
-          console.error(`❌ Owner WhatsApp notification failed for ${registrationId}:`, ownerWaErr.message);
+          console.error(
+            `❌ Owner WhatsApp notification failed for ${registrationId}:`,
+            ownerWaErr.message,
+          );
         }
-
       } catch (waUploadErr) {
         // The upload itself failed. Log and continue — email still works.
-        console.error(`❌ WhatsApp media upload failed for ${registrationId}:`, waUploadErr.message);
+        console.error(
+          `❌ WhatsApp media upload failed for ${registrationId}:`,
+          waUploadErr.message,
+        );
       }
     }
 
@@ -704,21 +677,20 @@ app.post('/verify-payment', async (req, res) => {
         console.log(`✅ Emails sent for ${registrationId} to ${email}`);
       }
     } catch (emailErr) {
-      console.error('❌ Email send failed:', emailErr.message);
+      console.error("❌ Email send failed:", emailErr.message);
       // Non-fatal — payment is verified and DB record is saved regardless.
     }
 
     // ── 8. Respond success ──────────────────────────────────────
     res.json({
-      success:        true,
+      success: true,
       registrationId,
-      paymentId:      razorpay_payment_id,
-      message:        'Registration confirmed! Check your email for the Garba Pass.',
+      paymentId: razorpay_payment_id,
+      message: "Registration confirmed! Check your email for the Garba Pass.",
     });
-
   } catch (err) {
-    console.error('❌ /verify-payment error:', err);
-    res.status(500).json({ success: false, error: 'Internal server error.' });
+    console.error("❌ /verify-payment error:", err);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 });
 
@@ -740,7 +712,7 @@ app.post('/verify-payment', async (req, res) => {
  * "resend" button) can trigger it without extra auth overhead.
  * Rate-limit it at your CDN/Vercel edge layer if needed.
  */
-app.post('/api/send-whatsapp-pass', async (req, res) => {
+app.post("/api/send-whatsapp-pass", async (req, res) => {
   try {
     const { registrationId, phone } = req.body;
 
@@ -748,23 +720,24 @@ app.post('/api/send-whatsapp-pass', async (req, res) => {
     if (!registrationId || !phone) {
       return res.status(400).json({
         success: false,
-        error: 'Both registrationId and phone are required.',
+        error: "Both registrationId and phone are required.",
       });
     }
 
     // Basic phone sanity — must be digits only (E.164 without '+').
     // The whatsapp util normalises the number further; this guards the DB query.
     // Strip spaces, dashes, and plus signs, making it a mutable variable (let)
-let normalisedPhone = String(phone).replace(/[\s\-\+]/g, '');
+    let normalisedPhone = String(phone).replace(/[\s\-\+]/g, "");
 
-// If the resulting string is exactly 10 digits, prepend India's country code (91)
-if (normalisedPhone.length === 10) {
-  normalisedPhone = '91' + normalisedPhone;
-}
+    // If the resulting string is exactly 10 digits, prepend India's country code (91)
+    if (normalisedPhone.length === 10) {
+      normalisedPhone = "91" + normalisedPhone;
+    }
     if (!/^\d{10,15}$/.test(normalisedPhone)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid phone number format. Provide digits only (E.164, no "+").',
+        error:
+          'Invalid phone number format. Provide digits only (E.164, no "+").',
       });
     }
 
@@ -784,44 +757,59 @@ if (normalisedPhone.length === 10) {
     if (!mediaId) {
       // ── 3b. Fallback: mediaId was never cached (upload failed at
       //        payment time). Regenerate the PDF and re-upload now.
-      console.warn(`⚠️  No cached mediaId for ${registrationId} — regenerating PDF and re-uploading.`);
+      console.warn(
+        `⚠️  No cached mediaId for ${registrationId} — regenerating PDF and re-uploading.`,
+      );
 
       let pdfBuffer;
       try {
         pdfBuffer = await generateGarbaPDF({
-          name:           reg.name,
-          email:          reg.email,
-          phone:          reg.phone,
-          age:            reg.age,
-          level:          reg.level,
-          city:           reg.city,
+          name: reg.name,
+          email: reg.email,
+          phone: reg.phone,
+          age: reg.age,
+          level: reg.level,
+          city: reg.city,
           registrationId: reg.registrationId,
-          paymentId:      reg.paymentId,
-          orderId:        reg.orderId,
-          paidAt:         reg.paidAt,
+          paymentId: reg.paymentId,
+          orderId: reg.orderId,
+          paidAt: reg.paidAt,
         });
       } catch (pdfErr) {
-        console.error(`❌ PDF regeneration failed for ${registrationId}:`, pdfErr.message);
+        console.error(
+          `❌ PDF regeneration failed for ${registrationId}:`,
+          pdfErr.message,
+        );
         return res.status(500).json({
           success: false,
-          error: 'Could not regenerate the pass PDF. Please try again later.',
+          error: "Could not regenerate the pass PDF. Please try again later.",
         });
       }
 
       try {
-        mediaId = await uploadMedia(pdfBuffer, 'garba-pass.pdf', 'application/pdf');
+        mediaId = await uploadMedia(
+          pdfBuffer,
+          "garba-pass.pdf",
+          "application/pdf",
+        );
 
         // Persist the newly acquired mediaId so subsequent requests are instant.
         await Registration.findByIdAndUpdate(reg._id, {
           $set: { whatsappMediaId: mediaId },
         });
 
-        console.log(`✅ Re-uploaded PDF for ${registrationId} — new mediaId: ${mediaId}`);
+        console.log(
+          `✅ Re-uploaded PDF for ${registrationId} — new mediaId: ${mediaId}`,
+        );
       } catch (uploadErr) {
-        console.error(`❌ PDF re-upload to Meta failed for ${registrationId}:`, uploadErr.message);
+        console.error(
+          `❌ PDF re-upload to Meta failed for ${registrationId}:`,
+          uploadErr.message,
+        );
         return res.status(502).json({
           success: false,
-          error: 'Could not upload pass to WhatsApp. Meta API may be unavailable.',
+          error:
+            "Could not upload pass to WhatsApp. Meta API may be unavailable.",
         });
       }
     }
@@ -834,25 +822,31 @@ if (normalisedPhone.length === 10) {
         normalisedPhone,
         mediaId,
         `GarbaPass_${registrationId}.pdf`,
-        `🎉 Your Bliss Out Dance Studio Garba Pass is here! Please save this — you'll need it on Day 1.`
+        `🎉 Your Bliss Out Dance Studio Garba Pass is here! Please save this — you'll need it on Day 1.`,
       );
 
       await sendWhatsAppText(
         normalisedPhone,
         `Hi ${reg.name}! 🙏 Your spot in the One-Month Garba Workshop 2025 is confirmed.\n\n` +
-        `📋 Reg ID: ${registrationId}\n` +
-        `📅 Starts: 1st October 2025\n` +
-        `🕐 Timing: 6:30 PM – 8:30 PM (Mon–Sat)\n` +
-        `📍 Venue: Bliss Out Studio, Khandwa MP\n\n` +
-        `See you on the dance floor! 💃🕺`
+          `📋 Reg ID: ${registrationId}\n` +
+          `📅 Starts: 1st October 2025\n` +
+          `🕐 Timing: 6:30 PM – 8:30 PM (Mon–Sat)\n` +
+          `📍 Venue: Bliss Out Studio, Khandwa MP\n\n` +
+          `See you on the dance floor! 💃🕺`,
       );
 
-      console.log(`✅ WhatsApp pass sent to ${normalisedPhone} for ${registrationId}`);
+      console.log(
+        `✅ WhatsApp pass sent to ${normalisedPhone} for ${registrationId}`,
+      );
     } catch (sendErr) {
-      console.error(`❌ WhatsApp send failed for ${registrationId}:`, sendErr.message);
+      console.error(
+        `❌ WhatsApp send failed for ${registrationId}:`,
+        sendErr.message,
+      );
       return res.status(502).json({
         success: false,
-        error: 'Pass upload succeeded but WhatsApp delivery failed. Please try again.',
+        error:
+          "Pass upload succeeded but WhatsApp delivery failed. Please try again.",
       });
     }
 
@@ -862,21 +856,22 @@ if (normalisedPhone.length === 10) {
       message: `Garba Pass sent via WhatsApp to ${normalisedPhone}.`,
       registrationId,
     });
-
   } catch (err) {
-    console.error('❌ /api/send-whatsapp-pass error:', err);
-    res.status(500).json({ success: false, error: 'Internal server error.' });
+    console.error("❌ /api/send-whatsapp-pass error:", err);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 });
 
-app.post('/admin/students', async (req, res) => {
+app.post("/admin/students", async (req, res) => {
   if (req.body.password !== process.env.ADMIN_RESET_PASSWORD) {
-    return res.status(401).json({ success: false, message: 'Unauthorized' });
+    return res.status(401).json({ success: false, message: "Unauthorized" });
   }
 
   try {
-    const students = await Registration.find({ isArchived: false })
-      .sort({ paidAt: -1, createdAt: -1 });
+    const students = await Registration.find({ isArchived: false }).sort({
+      paidAt: -1,
+      createdAt: -1,
+    });
 
     return res.status(200).json({
       success: true,
@@ -884,8 +879,10 @@ app.post('/admin/students', async (req, res) => {
       students,
     });
   } catch (error) {
-    console.error('Error fetching students:', error);
-    return res.status(500).json({ success: false, message: 'Failed to fetch students.' });
+    console.error("Error fetching students:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch students." });
   }
 });
 
@@ -904,27 +901,31 @@ app.post('/admin/students', async (req, res) => {
  *        -H "Content-Type: application/json" \
  *        -d '{"password": "your_secret_password_here"}'
  */
-app.post('/admin/reset-batch', async (req, res) => {
+app.post("/admin/reset-batch", async (req, res) => {
   try {
     const { password } = req.body;
 
     // ── Auth check ──────────────────────────────────────────────
     const adminPassword = process.env.ADMIN_RESET_PASSWORD;
     if (!adminPassword) {
-      return res.status(503).json({ error: 'Admin reset is not configured on this server.' });
+      return res
+        .status(503)
+        .json({ error: "Admin reset is not configured on this server." });
     }
     if (!password || password !== adminPassword) {
-      console.warn('⚠️  Unauthorized /admin/reset-batch attempt');
-      return res.status(401).json({ error: 'Unauthorized.' });
+      console.warn("⚠️  Unauthorized /admin/reset-batch attempt");
+      return res.status(401).json({ error: "Unauthorized." });
     }
 
     // ── Count active registrations before archiving ─────────────
-    const activeCount = await Registration.countDocuments({ isArchived: false });
+    const activeCount = await Registration.countDocuments({
+      isArchived: false,
+    });
 
     if (activeCount === 0) {
       return res.json({
         success: true,
-        message: 'No active registrations to archive. Batch is already empty.',
+        message: "No active registrations to archive. Batch is already empty.",
         archivedCount: 0,
         seatsNowAvailable: BATCH_CAPACITY,
       });
@@ -933,22 +934,23 @@ app.post('/admin/reset-batch', async (req, res) => {
     // ── Archive all active registrations ────────────────────────
     const result = await Registration.updateMany(
       { isArchived: false },
-      { $set: { isArchived: true } }
+      { $set: { isArchived: true } },
     );
 
     const archivedCount = result.modifiedCount;
-    console.log(`✅ Admin reset: ${archivedCount} registrations archived. New batch open.`);
+    console.log(
+      `✅ Admin reset: ${archivedCount} registrations archived. New batch open.`,
+    );
 
     res.json({
-      success:           true,
-      message:           `Batch reset complete. ${archivedCount} registrations archived.`,
+      success: true,
+      message: `Batch reset complete. ${archivedCount} registrations archived.`,
       archivedCount,
       seatsNowAvailable: BATCH_CAPACITY,
     });
-
   } catch (err) {
-    console.error('❌ /admin/reset-batch error:', err);
-    res.status(500).json({ error: 'Failed to reset batch.' });
+    console.error("❌ /admin/reset-batch error:", err);
+    res.status(500).json({ error: "Failed to reset batch." });
   }
 });
 
@@ -956,20 +958,20 @@ app.post('/admin/reset-batch', async (req, res) => {
  * POST /test-email   (only available in development)
  * Useful to test email + PDF without going through payment.
  */
-if (process.env.NODE_ENV !== 'production') {
-  app.post('/test-email', async (req, res) => {
+if (process.env.NODE_ENV !== "production") {
+  app.post("/test-email", async (req, res) => {
     try {
       const testData = {
-        name:           req.body.name  || 'Test User',
-        email:          req.body.email || process.env.EMAIL_USER,
-        phone:          '9876543210',
-        age:            '25',
-        level:          'beginner',
-        city:           'Khandwa',
+        name: req.body.name || "Test User",
+        email: req.body.email || process.env.EMAIL_USER,
+        phone: "9876543210",
+        age: "25",
+        level: "beginner",
+        city: "Khandwa",
         registrationId: generateRegistrationId(),
-        paymentId:      'test_pay_' + uuidv4().slice(0,8),
-        orderId:        'test_ord_' + uuidv4().slice(0,8),
-        paidAt:         new Date(),
+        paymentId: "test_pay_" + uuidv4().slice(0, 8),
+        orderId: "test_ord_" + uuidv4().slice(0, 8),
+        paidAt: new Date(),
       };
 
       const pdf = await generateGarbaPDF(testData);
@@ -983,20 +985,20 @@ if (process.env.NODE_ENV !== 'production') {
 
 // ── 404 HANDLER ──────────────────────────────────────────────────
 app.use((req, res) => {
-  res.status(404).json({ error: 'Route not found.' });
+  res.status(404).json({ error: "Route not found." });
 });
 
 // ── GLOBAL ERROR HANDLER ─────────────────────────────────────────
 app.use((err, req, res, _next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'An unexpected error occurred.' });
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "An unexpected error occurred." });
 });
 
 // ── START SERVER ─────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🚀 Bliss Out API running on port ${PORT}`);
-  console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`   CORS origin: ${process.env.FRONTEND_URL || '(all)'}`);
+  console.log(`   Environment: ${process.env.NODE_ENV || "development"}`);
+  console.log(`   CORS origin: ${process.env.FRONTEND_URL || "(all)"}`);
   console.log(`   Batch capacity: ${BATCH_CAPACITY} seats\n`);
 });
 
