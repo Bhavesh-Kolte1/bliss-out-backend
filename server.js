@@ -465,6 +465,9 @@ app.get("/", (req, res) => {
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
+// Silence favicon 404 noise — this is a JSON API with no static assets.
+app.get(["/favicon.ico", "/favicon.png"], (req, res) => res.status(204).end());
+
 // ── Seat availability (public) ────────────────────────────────────
 app.get("/seats", async (req, res) => {
   try {
