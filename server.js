@@ -31,21 +31,59 @@ const {
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ── MONGOOSE CONNECTION ──────────────────────────────────────────
+// ── MONGOOSE CONNECTION (serverless-safe, cached across warm invocations) ──
 const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
-  console.error("❌ MONGO_URI is not set in .env — exiting.");
-  process.exit(1);
+  console.error("❌ MONGO_URI is not set.");
+  // Do NOT process.exit() here either — let requests fail gracefully instead.
 }
 
-mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => {
-    console.error("❌ MongoDB connection error:", err.message);
-    process.exit(1);
-  });
+// Reuse the connection across warm Lambda invocations instead of
+// reconnecting (and instead of ever killing the process) on every call.
+let cachedConnPromise = null;
+
+async function connectDB() {
+  if (mongoose.connection.readyState === 1) {
+    // 1 = connected — reuse existing connection
+    return mongoose.connection;
+  }
+
+  if (!cachedConnPromise) {
+    cachedConnPromise = mongoose
+      .connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 8000, // fail fast instead of hanging
+        socketTimeoutMS: 45000,
+        maxPoolSize: 10,
+      })
+      .then((conn) => {
+        console.log("✅ MongoDB connected");
+        return conn;
+      })
+      .catch((err) => {
+        console.error("❌ MongoDB connection error:", err.message);
+        cachedConnPromise = null; // allow retry on next request
+        throw err; // propagate — do NOT process.exit()
+      });
+  }
+
+  return cachedConnPromise;
+}
+
+// Ensure every request has a DB connection before hitting route handlers.
+// If the connection genuinely fails, the client gets a clean 503, not a
+// crashed function.
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    res.status(503).json({
+      success: false,
+      error: "Database temporarily unavailable. Please retry.",
+    });
+  }
+});
 
 // ── MONGOOSE SCHEMAS & MODELS ────────────────────────────────────
 
@@ -994,12 +1032,14 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: "An unexpected error occurred." });
 });
 
-// ── START SERVER ─────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 Bliss Out API running on port ${PORT}`);
-  console.log(`   Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`   CORS origin: ${process.env.FRONTEND_URL || "(all)"}`);
-  console.log(`   Batch capacity: ${BATCH_CAPACITY} seats\n`);
-});
+// ── START SERVER (local dev only — Vercel imports `app` directly) ──────
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`\n🚀 Bliss Out API running on port ${PORT}`);
+    console.log(`   Environment: ${process.env.NODE_ENV || "development"}`);
+    console.log(`   CORS origin: ${process.env.FRONTEND_URL || "(all)"}`);
+    console.log(`   Batch capacity: ${BATCH_CAPACITY} seats\n`);
+  });
+}
 
 module.exports = app;
