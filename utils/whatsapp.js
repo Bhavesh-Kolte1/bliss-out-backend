@@ -239,6 +239,72 @@ async function sendWhatsAppDocument(to, mediaId, filename, caption) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 4. sendWhatsAppTemplate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sends the "garba_pass_confirmation" utility template — a single message
+ * containing the personalized PDF (as a DOCUMENT header) plus the student's
+ * name and registration ID as body variables. Used to replace the separate
+ * document + text combination with one template send.
+ *
+ * @param   {string} to              - Recipient's phone number (E.164, no '+').
+ * @param   {string} mediaId         - The ID returned by uploadMedia() for this student's PDF.
+ * @param   {string} studentName     - Value for the {{student_name}} body variable.
+ * @param   {string} registrationId  - Value for the {{registration_id}} body variable.
+ * @returns {Promise<object>}        - Resolves with Meta's response data.
+ */
+async function sendWhatsAppTemplate(to, mediaId, studentName, registrationId) {
+  const normalised = String(to).replace(/[\s\-\+]/g, '');
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type:    'individual',
+    to:                normalised,
+    type:              'template',
+    template: {
+      name:     'garba_pass_confirmation',
+      language: { code: 'en' },
+      components: [
+        {
+          type: 'header',
+          parameters: [
+            {
+              type: 'document',
+              document: {
+                id:       mediaId,
+                filename: `GarbaPass_${registrationId}.pdf`,
+              },
+            },
+          ],
+        },
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: studentName },
+            { type: 'text', text: registrationId },
+          ],
+        },
+      ],
+    },
+  };
+
+  try {
+    const response = await axios.post(
+      `${getPhoneNumberUrl()}/messages`,
+      payload,
+      { headers: { ...getAuthHeader(), 'Content-Type': 'application/json' } }
+    );
+
+    console.log(`[whatsapp] sendWhatsAppTemplate: sent garba_pass_confirmation to ${normalised}`);
+    return response.data;
+
+  } catch (err) {
+    handleApiError(err, 'sendWhatsAppTemplate');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -246,4 +312,5 @@ module.exports = {
   uploadMedia,
   sendWhatsAppText,
   sendWhatsAppDocument,
+  sendWhatsAppTemplate,
 };

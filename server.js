@@ -25,6 +25,7 @@ const {
   uploadMedia,
   sendWhatsAppText,
   sendWhatsAppDocument,
+  sendWhatsAppTemplate,
 } = require("./utils/whatsapp");
 
 // ── APP INIT ─────────────────────────────────────────────────────
@@ -674,6 +675,21 @@ app.post("/verify-payment", async (req, res) => {
           `✅ WhatsApp media uploaded for ${registrationId} — mediaId: ${mediaId}`,
         );
 
+        // ── 5b. Send confirmation template to student ───────────
+        //    Non-fatal: template failure must never affect the
+        //    student's success response or the owner notification below.
+        try {
+          await sendWhatsAppTemplate(phone, mediaId, name, registrationId);
+          console.log(
+            `✅ Student WhatsApp template sent for ${registrationId}`,
+          );
+        } catch (studentWaErr) {
+          console.error(
+            `❌ Student WhatsApp template failed for ${registrationId}:`,
+            studentWaErr.message,
+          );
+        }
+
         // ── 6. Notify studio owner via WhatsApp ─────────────────
         //    Fire-and-forget inside the same guard block: owner notification
         //    failure must never affect the student's success response.
@@ -792,6 +808,18 @@ app.post("/api/send-whatsapp-pass", async (req, res) => {
       });
     }
 
+    // ── 2b. Verify the submitted phone matches the registered phone ──
+    let normalisedRegPhone = String(reg.phone).replace(/[\s\-\+]/g, "");
+    if (normalisedRegPhone.length === 10) {
+      normalisedRegPhone = "91" + normalisedRegPhone;
+    }
+    if (normalisedRegPhone !== normalisedPhone) {
+      return res.status(403).json({
+        success: false,
+        error: "The phone number does not match this registration.",
+      });
+    }
+
     // ── 3. Resolve a valid Meta media ID ────────────────────────
     let mediaId = reg.whatsappMediaId;
 
@@ -859,25 +887,15 @@ app.post("/api/send-whatsapp-pass", async (req, res) => {
     //    Both calls run sequentially — the document first (so the
     //    student sees the PDF before the text), then the greeting.
     try {
-      await sendWhatsAppDocument(
+      await sendWhatsAppTemplate(
         normalisedPhone,
         mediaId,
-        `GarbaPass_${registrationId}.pdf`,
-        `🎉 Your Bliss Out Dance Studio Garba Pass is here! Please save this — you'll need it on Day 1.`,
-      );
-
-      await sendWhatsAppText(
-        normalisedPhone,
-        `Hi ${reg.name}! 🙏 Your spot in the One-Month Garba Workshop 2025 is confirmed.\n\n` +
-          `📋 Reg ID: ${registrationId}\n` +
-          `📅 Starts: 1st October 2025\n` +
-          `🕐 Timing: 6:30 PM – 8:30 PM (Mon–Sat)\n` +
-          `📍 Venue: Bliss Out Studio, Khandwa MP\n\n` +
-          `See you on the dance floor! 💃🕺`,
+        reg.name,
+        registrationId,
       );
 
       console.log(
-        `✅ WhatsApp pass sent to ${normalisedPhone} for ${registrationId}`,
+        `✅ WhatsApp pass template sent to ${normalisedPhone} for ${registrationId}`,
       );
     } catch (sendErr) {
       console.error(
