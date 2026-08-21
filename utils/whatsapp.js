@@ -5,17 +5,17 @@
 // All operations are buffer-based — no filesystem access required.
 // Safe for Vercel Serverless Functions.
 
-'use strict';
+"use strict";
 
-const axios     = require('axios');
-const FormData  = require('form-data');
+const axios = require("axios");
+const FormData = require("form-data");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GRAPH_API_VERSION = 'v18.0';
-const GRAPH_BASE_URL    = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
+const GRAPH_API_VERSION = "v18.0";
+const GRAPH_BASE_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
 /**
  * Returns the resolved base URL for the configured phone number ID.
@@ -25,7 +25,7 @@ const GRAPH_BASE_URL    = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 function getPhoneNumberUrl() {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!phoneNumberId) {
-    throw new Error('[whatsapp] Missing env var: WHATSAPP_PHONE_NUMBER_ID');
+    throw new Error("[whatsapp] Missing env var: WHATSAPP_PHONE_NUMBER_ID");
   }
   return `${GRAPH_BASE_URL}/${phoneNumberId}`;
 }
@@ -37,7 +37,7 @@ function getPhoneNumberUrl() {
 function getAuthHeader() {
   const token = process.env.WHATSAPP_TOKEN;
   if (!token) {
-    throw new Error('[whatsapp] Missing env var: WHATSAPP_TOKEN');
+    throw new Error("[whatsapp] Missing env var: WHATSAPP_TOKEN");
   }
   return { Authorization: `Bearer ${token}` };
 }
@@ -64,12 +64,15 @@ function handleApiError(err, context) {
     const metaError = err.response.data?.error ?? err.response.data;
 
     console.error(`[whatsapp] ${context} failed — HTTP ${err.response.status}`);
-    console.error('[whatsapp] Meta API error payload:', JSON.stringify(metaError, null, 2));
+    console.error(
+      "[whatsapp] Meta API error payload:",
+      JSON.stringify(metaError, null, 2),
+    );
 
     // Surface the most useful part of Meta's error to the caller.
     const detail =
       metaError?.error_data?.details ??
-      metaError?.message              ??
+      metaError?.message ??
       `HTTP ${err.response.status}`;
 
     throw new Error(`[whatsapp] ${context}: ${detail}`);
@@ -103,44 +106,44 @@ function handleApiError(err, context) {
  */
 async function uploadMedia(buffer, filename, mimeType) {
   const form = new FormData();
-  form.append('messaging_product', 'whatsapp');
-  form.append('type', mimeType);
+  form.append("messaging_product", "whatsapp");
+  form.append("type", mimeType);
 
   // Passing knownLength tells form-data the exact byte count so it can
   // set the Content-Length header correctly — required by Meta's endpoint.
-  form.append('file', buffer, {
+  form.append("file", buffer, {
     filename,
     contentType: mimeType,
-    knownLength:  buffer.length,
+    knownLength: buffer.length,
   });
 
   try {
-    const response = await axios.post(
-      `${getPhoneNumberUrl()}/media`,
-      form,
-      {
-        headers: {
-          ...getAuthHeader(),
-          ...form.getHeaders(), // includes Content-Type: multipart/form-data; boundary=...
-        },
-      }
-    );
+    const response = await axios.post(`${getPhoneNumberUrl()}/media`, form, {
+      headers: {
+        ...getAuthHeader(),
+        ...form.getHeaders(), // includes Content-Type: multipart/form-data; boundary=...
+      },
+    });
 
     const mediaId = response.data?.id;
 
     if (!mediaId) {
       // Unexpected shape — log what we received so it's easy to diagnose.
-      console.error('[whatsapp] uploadMedia: unexpected response shape:', response.data);
-      throw new Error('[whatsapp] uploadMedia: no media ID returned by Meta');
+      console.error(
+        "[whatsapp] uploadMedia: unexpected response shape:",
+        response.data,
+      );
+      throw new Error("[whatsapp] uploadMedia: no media ID returned by Meta");
     }
 
-    console.log(`[whatsapp] uploadMedia: success — mediaId=${mediaId}, file=${filename}`);
+    console.log(
+      `[whatsapp] uploadMedia: success — mediaId=${mediaId}, file=${filename}`,
+    );
     return mediaId;
-
   } catch (err) {
     // Re-throw only if it's not already our own formatted error.
-    if (err.message.startsWith('[whatsapp]') && !err.response) throw err;
-    handleApiError(err, 'uploadMedia');
+    if (err.message.startsWith("[whatsapp]") && !err.response) throw err;
+    handleApiError(err, "uploadMedia");
   }
 }
 
@@ -160,16 +163,16 @@ async function uploadMedia(buffer, filename, mimeType) {
  */
 async function sendWhatsAppText(to, message) {
   // Normalise: strip spaces, dashes, and the leading '+' if present.
-  const normalised = String(to).replace(/[\s\-\+]/g, '');
+  const normalised = String(to).replace(/[\s\-\+]/g, "");
 
   const payload = {
-    messaging_product: 'whatsapp',
-    recipient_type:    'individual',
-    to:                normalised,
-    type:              'text',
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: normalised,
+    type: "text",
     text: {
       preview_url: false, // set true if the message contains a URL to preview
-      body:        message,
+      body: message,
     },
   };
 
@@ -177,14 +180,13 @@ async function sendWhatsAppText(to, message) {
     const response = await axios.post(
       `${getPhoneNumberUrl()}/messages`,
       payload,
-      { headers: { ...getAuthHeader(), 'Content-Type': 'application/json' } }
+      { headers: { ...getAuthHeader(), "Content-Type": "application/json" } },
     );
 
     console.log(`[whatsapp] sendWhatsAppText: delivered to ${normalised}`);
     return response.data;
-
   } catch (err) {
-    handleApiError(err, 'sendWhatsAppText');
+    handleApiError(err, "sendWhatsAppText");
   }
 }
 
@@ -209,15 +211,15 @@ async function sendWhatsAppText(to, message) {
  * @returns {Promise<object>}  - Resolves with Meta's response data.
  */
 async function sendWhatsAppDocument(to, mediaId, filename, caption) {
-  const normalised = String(to).replace(/[\s\-\+]/g, '');
+  const normalised = String(to).replace(/[\s\-\+]/g, "");
 
   const payload = {
-    messaging_product: 'whatsapp',
-    recipient_type:    'individual',
-    to:                normalised,
-    type:              'document',
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: normalised,
+    type: "document",
     document: {
-      id:       mediaId,   // reference the pre-uploaded buffer — no public URL needed
+      id: mediaId, // reference the pre-uploaded buffer — no public URL needed
       filename,
       caption,
     },
@@ -227,14 +229,15 @@ async function sendWhatsAppDocument(to, mediaId, filename, caption) {
     const response = await axios.post(
       `${getPhoneNumberUrl()}/messages`,
       payload,
-      { headers: { ...getAuthHeader(), 'Content-Type': 'application/json' } }
+      { headers: { ...getAuthHeader(), "Content-Type": "application/json" } },
     );
 
-    console.log(`[whatsapp] sendWhatsAppDocument: sent "${filename}" to ${normalised}`);
+    console.log(
+      `[whatsapp] sendWhatsAppDocument: sent "${filename}" to ${normalised}`,
+    );
     return response.data;
-
   } catch (err) {
-    handleApiError(err, 'sendWhatsAppDocument');
+    handleApiError(err, "sendWhatsAppDocument");
   }
 }
 
@@ -255,34 +258,42 @@ async function sendWhatsAppDocument(to, mediaId, filename, caption) {
  * @returns {Promise<object>}        - Resolves with Meta's response data.
  */
 async function sendWhatsAppTemplate(to, mediaId, studentName, registrationId) {
-  const normalised = String(to).replace(/[\s\-\+]/g, '');
+  const normalised = String(to).replace(/[\s\-\+]/g, "");
 
   const payload = {
-    messaging_product: 'whatsapp',
-    recipient_type:    'individual',
-    to:                normalised,
-    type:              'template',
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: normalised,
+    type: "template",
     template: {
-      name:     'garba_pass_confirmation',
-      language: { code: 'en' },
+      name: "garba_pass_confirmation",
+      language: { code: "en" },
       components: [
         {
-          type: 'header',
+          type: "header",
           parameters: [
             {
-              type: 'document',
+              type: "document",
               document: {
-                id:       mediaId,
+                id: mediaId,
                 filename: `GarbaPass_${registrationId}.pdf`,
               },
             },
           ],
         },
         {
-          type: 'body',
+          type: "body",
           parameters: [
-            { type: 'text', text: studentName },
-            { type: 'text', text: registrationId },
+            {
+              type: "text",
+              parameter_name: "student_name",
+              text: studentName,
+            },
+            {
+              type: "text",
+              parameter_name: "registration_id",
+              text: registrationId,
+            },
           ],
         },
       ],
@@ -293,14 +304,15 @@ async function sendWhatsAppTemplate(to, mediaId, studentName, registrationId) {
     const response = await axios.post(
       `${getPhoneNumberUrl()}/messages`,
       payload,
-      { headers: { ...getAuthHeader(), 'Content-Type': 'application/json' } }
+      { headers: { ...getAuthHeader(), "Content-Type": "application/json" } },
     );
 
-    console.log(`[whatsapp] sendWhatsAppTemplate: sent garba_pass_confirmation to ${normalised}`);
+    console.log(
+      `[whatsapp] sendWhatsAppTemplate: sent garba_pass_confirmation to ${normalised}`,
+    );
     return response.data;
-
   } catch (err) {
-    handleApiError(err, 'sendWhatsAppTemplate');
+    handleApiError(err, "sendWhatsAppTemplate");
   }
 }
 
